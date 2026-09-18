@@ -1,0 +1,12 @@
+rules:
+  - id: python-review-formatted-sql
+    languages: [python]
+    severity: WARNING
+    message: Review interpolated SQL; bind values and independently allowlist any dynamic identifiers.
+    pattern-either:
+      - pattern: $DB.execute(f"...", ...)
+      - pattern: $DB.executemany(f"...", ...)
+      - pattern: $DB.executescript(f"...", ...)
+      - pattern: $DB.execute($FORMAT.format(...), ...)
+      - pattern: $DB.executemany($FORMAT.format(...), ...)
+      - pattern: $DB.execute($FORMAT % $VALUES, ...)

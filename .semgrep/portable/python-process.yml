@@ -1,0 +1,15 @@
+rules:
+  - id: python-no-shell-execution
+    languages: [python]
+    severity: ERROR
+    message: Use an explicit executable and argv; do not evaluate commands through a shell.
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: asyncio.create_subprocess_shell(...)
+      - patterns:
+          - pattern: subprocess.$FUNC([$SHELL, "-c", ...], ...)
+          - metavariable-regex:
+              metavariable: $SHELL
+              regex: "['\"](?:.*/)?(?:sh|bash|dash|zsh|ksh)['\"]"

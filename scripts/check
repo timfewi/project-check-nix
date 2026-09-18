@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+if [[ "${1:-}" != fast || "$#" -ne 1 ]]; then
+  echo "Usage: bash scripts/check fast" >&2
+  exit 2
+fi
+mapfile -d '' -t nix_files < <(git ls-files --cached --others --exclude-standard -z -- '*.nix')
+nix run --no-write-lock-file path:.#formatter.x86_64-linux -- --check "${nix_files[@]}"
+nix flake check --no-write-lock-file --no-build path:.
+exec nix build --no-link --max-jobs 1 --cores 2 --no-write-lock-file \
+  path:.#checks.x86_64-linux.python-tests

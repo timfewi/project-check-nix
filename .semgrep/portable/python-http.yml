@@ -1,0 +1,11 @@
+rules:
+  - id: python-no-disabled-tls-verification
+    languages: [python]
+    severity: ERROR
+    message: Keep certificate and hostname verification enabled.
+    pattern-either:
+      - pattern: requests.$FUNC(..., verify=False, ...)
+      - pattern: httpx.$FUNC(..., verify=False, ...)
+      - pattern: $CONTEXT.verify_mode = ssl.CERT_NONE
+      - pattern: $CONTEXT.check_hostname = False
+      - pattern: ssl._create_unverified_context(...)
