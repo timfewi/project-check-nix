@@ -12,6 +12,48 @@ from runtime import project_check as checks
 
 
 class ProjectCheckTests(unittest.TestCase):
+    def test_omitted_cwd_defaults_to_project_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            check = self.check(
+                "judgment-replay",
+                "from pathlib import Path; assert Path('evidence.txt').read_text() == 'fixture'",
+            )
+            del check["cwd"]
+            (root / "evidence.txt").write_text("fixture")
+            (root / checks.MANIFEST).write_text(
+                json.dumps({"version": 1, "checks": [check]})
+            )
+            declared = checks.load(root)["checks"][0]
+            self.assertEqual(declared["cwd"], ".")
+            self.assertEqual(checks.run_check(root, declared, root)["status"], "passed")
+
+    def test_offline_evaluation_exit_status_overrules_model_claims(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "answers.json"
+            fixture.write_text(json.dumps({"choice": "c0", "expected": "c0"}))
+            evaluation = root / "evaluate.py"
+            evaluation.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "case = json.loads(Path('answers.json').read_text())\n"
+                "print(json.dumps({'model_claim': 'passed', 'confidence': 1.0}))\n"
+                "raise SystemExit(0 if case['choice'] == case['expected'] else 1)\n"
+            )
+            check = self.check("judgment-replay", "")
+            check["argv"] = [sys.executable, "evaluate.py"]
+            (root / checks.MANIFEST).write_text(
+                json.dumps({"version": 1, "checks": [check]})
+            )
+            declared = checks.load(root)["checks"][0]
+            self.assertEqual(checks.run_check(root, declared, root)["status"], "passed")
+            fixture.write_text(json.dumps({"choice": "c0", "expected": "none"}))
+            result = checks.run_check(root, declared, root)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["returncode"], 1)
+            self.assertIn('"confidence": 1.0', result["diagnostics"])
+
     def check(self, name, code, **overrides):
         return {
             "name": name,

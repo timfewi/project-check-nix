@@ -114,7 +114,7 @@ def load(root: Path) -> dict:
             or not 0 < timeout <= 3600
         ):
             raise CheckError(f"{name}: timeout must be between 0 and 3600 seconds")
-        cwd = check.get("cwd")
+        cwd = check.setdefault("cwd", ".")
         if (
             not isinstance(cwd, str)
             or not cwd

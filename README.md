@@ -53,6 +53,27 @@ never reports `passed`.
 - `profiles` is a nonempty subset of `fast` and `full`.
 - `watch_ignore` lists glob patterns excluded from change detection.
 
+## Offline judgment evaluation
+
+Offline judgment evaluations use the existing manifest contract; no provider
+integration or new profile is needed:
+
+```json
+{
+  "name": "judgment-replay",
+  "argv": ["python3", "evaluate.py"],
+  "requires": ["python3"],
+  "timeout_seconds": 30,
+  "profiles": ["fast", "full"]
+}
+```
+
+Add that entry to `checks`. The evaluator owns questions, fixtures and assertions;
+the runner uses its exit status and diagnostics. A model claiming success or
+returning high confidence cannot overrule a failing evaluation. Offline replay
+proves code behavior, not model accuracy. Live/paid evaluation remains an explicit
+separate operation; this runner is not a network sandbox.
+
 ## Portable quality rules
 
 The immutable baseline scans Python with three portable Semgrep rules under
