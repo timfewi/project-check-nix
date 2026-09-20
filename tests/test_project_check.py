@@ -138,6 +138,24 @@ class ProjectCheckTests(unittest.TestCase):
             with self.assertRaises(checks.CheckError):
                 checks.load(root)
 
+    def test_nix_dirty_tree_notice_does_not_hide_real_warnings_or_failures(self):
+        notice = "warning: Git tree '/workspace/project' is dirty"
+        cases = [
+            (notice, 0, "passed"),
+            (notice + "\nwarning: unused variable", 0, "failed"),
+            (notice + "\n1 warning generated.", 0, "failed"),
+            (notice, 1, "failed"),
+            (notice + ": warning: unexpected suffix", 0, "failed"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for output, code, status in cases:
+                with self.subTest(output=output, code=code):
+                    check = self.check("format", f"print({output!r}); exit({code})")
+                    result = checks.run_check(root, check, root)
+                    self.assertEqual(result["status"], status)
+                    self.assertIn(output, result["diagnostics"])
+
     def test_argv_and_relative_cwd_are_preserved(self):
         with tempfile.TemporaryDirectory(prefix="project with spaces ") as directory:
             root = Path(directory)

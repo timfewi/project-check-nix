@@ -53,6 +53,11 @@ never reports `passed`.
 - `profiles` is a nonempty subset of `fast` and `full`.
 - `watch_ignore` lists glob patterns excluded from change detection.
 
+Warnings fail an otherwise successful check. The exact Nix `warning: Git tree
+'…' is dirty` notice is retained as diagnostic context but is not a quality
+failure: checking uncommitted edits is the normal workflow. Compiler/linter
+warnings, warning counts and nonzero exit statuses still fail the check.
+
 ## Offline judgment evaluation
 
 Offline judgment evaluations use the existing manifest contract; no provider

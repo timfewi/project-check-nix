@@ -40,6 +40,9 @@ IGNORED = frozenset(
 WARNING = re.compile(
     r"(?im)\b(?:[A-Za-z]+Warning|warning)(?:\s*\[|:)|\b[1-9]\d* warnings?\b"
 )
+# Checking uncommitted edits is the normal agent workflow. Nix's dirty-tree
+# notice describes input identity, not a lint finding; retain it in diagnostics.
+NIX_DIRTY_NOTICE = re.compile(r"warning: Git tree '[^\r\n]+' is dirty")
 ENVIRONMENT_FAILURE = re.compile(
     r"no matching package named|failed to download|can't find crate for|"
     r"required command not found|TOOLCHAIN_(?:STALE|NOT_REGISTERED)|"
@@ -208,7 +211,10 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     result["diagnostics"] += diagnostics
     if ENVIRONMENT_FAILURE.search(diagnostics):
         result["status"] = "blocked"
-    elif result["status"] == "passed" and WARNING.search(diagnostics):
+    elif result["status"] == "passed" and any(
+        WARNING.search(line) and not NIX_DIRTY_NOTICE.fullmatch(line)
+        for line in diagnostics.splitlines()
+    ):
         result["status"] = "failed"
         result["diagnostics"] += "\nWarnings make this required check unsuccessful.\n"
     result["duration_seconds"] = round(time.monotonic() - started, 3)
