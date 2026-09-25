@@ -1,6 +1,6 @@
 # Repository policy
 
-- This private repository owns the portable `project-check` verification runner
+- This repository owns the portable `project-check` verification runner
   and its immutable portable quality rules.
 - Keep code, comments, documentation, and user-facing text in English.
 - Do not add credentials, authentication stores, personal files, private keys,
