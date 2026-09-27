@@ -138,6 +138,62 @@ class ProjectCheckTests(unittest.TestCase):
             with self.assertRaises(checks.CheckError):
                 checks.load(root)
 
+    def test_missing_tools_explain_how_to_restore_the_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = checks.run_check(
+                root, self.check("missing", "", requires=["synthetic-missing-checker"]), root
+            )
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("synthetic-missing-checker", result["diagnostics"])
+            self.assertIn("nix develop path:.", result["diagnostics"])
+            self.assertIn("devShells", result["diagnostics"])
+
+    def test_unavailable_program_reports_blocker_without_exposing_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "not-executable"
+            program.write_text("not executable")
+            for executable in (str(program), "synthetic-missing-checker"):
+                with self.subTest(executable=executable):
+                    result = checks.run_check(
+                        root,
+                        self.check("start", "", argv=[executable, "sensitive-argument"]),
+                        root,
+                    )
+                    self.assertEqual(result["status"], "blocked")
+                    self.assertIn(executable, result["diagnostics"])
+                    self.assertIn("nix develop path:.", result["diagnostics"])
+                    self.assertNotIn("sensitive-argument", result["diagnostics"])
+
+    def test_shell_exit_codes_and_silent_failures_have_actionable_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for code, status in ((126, "blocked"), (127, "blocked"), (23, "failed")):
+                with self.subTest(code=code):
+                    result = checks.run_check(root, self.check("shell", f"exit({code})"), root)
+                    self.assertEqual(result["status"], status)
+                    self.assertEqual(result["returncode"], code)
+                    self.assertIn(str(code), result["diagnostics"])
+                    if status == "blocked":
+                        self.assertIn("nix develop path:.", result["diagnostics"])
+
+    def test_environment_only_blockers_remain_blocked_in_text_and_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            document = {"checks": [self.check("missing", "", requires=["synthetic-missing-checker"])]}
+            for json_output in (False, True):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), patch.object(
+                    checks, "baseline", return_value={"name": "baseline", "status": "passed", "diagnostics": ""}
+                ):
+                    report = checks.run(root, document, "fast", json_output=json_output)
+                self.assertEqual(report["status"], "blocked")
+                if json_output:
+                    self.assertEqual(json.loads(output.getvalue()), report)
+                else:
+                    self.assertIn("project-check fast: blocked", output.getvalue())
+
     def test_nix_dirty_tree_notice_does_not_hide_real_warnings_or_failures(self):
         notice = "warning: Git tree '/workspace/project' is dirty"
         cases = [

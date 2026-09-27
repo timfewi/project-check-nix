@@ -20,6 +20,11 @@ MANIFEST = ".project-checks.json"
 QUALITY_RULES = "@qualityRules@"
 SEMGREP = "@semgrep@"
 CA_CERT_FILE = "@cacert@/etc/ssl/certs/ca-bundle.crt"
+TOOLCHAIN_HINT = (
+    "Enter the project toolchain with `nix develop path:.` (or reload direnv), "
+    "then retry. If the tool is still unavailable, declare it in flake.nix "
+    "devShells and check its executable permissions/interpreter."
+)
 
 IGNORED = frozenset(
     {
@@ -153,7 +158,9 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     }
     missing = [name for name in check["requires"] if shutil.which(name) is None]
     if missing:
-        result["diagnostics"] = "missing required programs: " + ", ".join(missing)
+        result["diagnostics"] = (
+            "missing required programs: " + ", ".join(missing) + "\n" + TOOLCHAIN_HINT
+        )
         return result
     cwd = (root / check["cwd"]).resolve()
     if not cwd.is_relative_to(root) or not cwd.is_dir():
@@ -189,7 +196,9 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
                 start_new_session=True,
             )
         except OSError as error:
-            result["diagnostics"] = f"runner could not start: {error}"
+            result["diagnostics"] = (
+                f"runner could not start {check['argv'][0]!r}: {error}\n{TOOLCHAIN_HINT}"
+            )
             return result
         try:
             process.wait(timeout=check["timeout_seconds"])
@@ -209,7 +218,12 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
         output.seek(0)
         diagnostics = output.read().decode("utf-8", errors="replace")
     result["diagnostics"] += diagnostics
-    if ENVIRONMENT_FAILURE.search(diagnostics):
+    if result["returncode"] in (126, 127):
+        result["status"] = "blocked"
+        result["diagnostics"] += (
+            f"\nCommand unavailable (exit {result['returncode']}).\n{TOOLCHAIN_HINT}\n"
+        )
+    elif ENVIRONMENT_FAILURE.search(diagnostics):
         result["status"] = "blocked"
     elif result["status"] == "passed" and any(
         WARNING.search(line) and not NIX_DIRTY_NOTICE.fullmatch(line)
@@ -217,6 +231,8 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     ):
         result["status"] = "failed"
         result["diagnostics"] += "\nWarnings make this required check unsuccessful.\n"
+    if result["status"] == "failed" and result["returncode"]:
+        result["diagnostics"] += f"\nCommand exited with status {result['returncode']}.\n"
     result["duration_seconds"] = round(time.monotonic() - started, 3)
     return result
 
@@ -366,6 +382,8 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
         "profile": profile,
         "status": "passed"
         if selected and all(result["status"] == "passed" for result in selected)
+        else "blocked"
+        if selected and not any(result["status"] == "failed" for result in selected)
         else "failed",
         "checks": results,
     }

@@ -58,6 +58,16 @@ Warnings fail an otherwise successful check. The exact Nix `warning: Git tree
 failure: checking uncommitted edits is the normal workflow. Compiler/linter
 warnings, warning counts and nonzero exit statuses still fail the check.
 
+Missing requirements, process-start errors and shell exit codes 126/127 report
+`blocked`, with instructions to enter `nix develop path:.` or repair the declared
+`devShells` tools. Nonzero command exits include their exit status even when the
+command printed nothing. Diagnostics from the runner do not echo argv arguments;
+the invoked tools remain responsible for their own output.
+
+The overall text/JSON status is `blocked` when selected checks have environment
+blockers but no failures. A real failure takes precedence over a blocker. Both
+statuses exit 1, so CI never treats a blocked run as success; `passed` exits 0.
+
 ## Offline judgment evaluation
 
 Offline judgment evaluations use the existing manifest contract; no provider
@@ -94,7 +104,22 @@ From the flake:
 inputs.project-check.url = "git+https://github.com/timfewi/project-check-nix.git?ref=main";
 ```
 
-Install the runner on the host and make it reachable to agents:
+Declare the runner in each project's development shell so Just recipes also work
+in a normal terminal, independently of an agent's toolbox:
+
+```nix
+inputs.project-check.inputs.nixpkgs.follows = "nixpkgs";
+# Include project-check in the outputs function's arguments.
+devShells.x86_64-linux.default = pkgs.mkShell {
+  packages = [ project-check.packages.x86_64-linux.project-check ];
+};
+```
+
+Keep `flake.lock` reviewed and pinned. New `repo-scaffold-nix` templates include
+this dependency and forward `just lint --json` to `project-check fast --json`.
+Existing projects need a deliberate flake/Justfile update.
+
+Host and agent-only installations are also supported:
 
 ```nix
 environment.systemPackages = [ inputs.project-check.packages.x86_64-linux.project-check ];
