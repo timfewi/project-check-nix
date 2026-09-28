@@ -394,11 +394,11 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
         "checks": results,
     }
     if json_output:
-        print(json.dumps(report))
+        print(json.dumps(report), flush=True)
     else:
         for result in results:
             print(f"{result['status']}: {result['name']}")
-        print(f"project-check {profile}: {report['status']}")
+        print(f"project-check {profile}: {report['status']}", flush=True)
     return report
 
 
@@ -432,10 +432,36 @@ def snapshot(root: Path, patterns: list[str]) -> dict:
     return result
 
 
+def report_blocked(error: Exception, *, json_output: bool) -> None:
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "version": 1,
+                    "status": "blocked",
+                    "diagnostics": str(error),
+                    "checks": [],
+                }
+            ),
+            flush=True,
+        )
+    else:
+        print(f"project-check: blocked: {error}", file=sys.stderr)
+
+
 def watch(root: Path, *, json_output: bool) -> int:
-    document = load(root)
+    try:
+        document = load(root)
+    except (CheckError, OSError) as error:
+        document = {"watch_ignore": []}
+        initial_error = error
+    else:
+        initial_error = None
     previous = snapshot(root, document.get("watch_ignore", []))
-    run(root, document, "fast", json_output=json_output)
+    if initial_error is None:
+        run(root, document, "fast", json_output=json_output)
+    else:
+        report_blocked(initial_error, json_output=json_output)
     changed_at = None
     while True:
         time.sleep(0.2)
@@ -444,10 +470,14 @@ def watch(root: Path, *, json_output: bool) -> int:
             previous = current
             changed_at = time.monotonic()
         if changed_at is not None and time.monotonic() - changed_at >= 0.5:
-            document = load(root)
             # Keep the pre-run snapshot so edits during a run schedule one more.
             changed_at = None
-            run(root, document, "fast", json_output=json_output)
+            try:
+                document = load(root)
+            except (CheckError, OSError) as error:
+                report_blocked(error, json_output=json_output)
+            else:
+                run(root, document, "fast", json_output=json_output)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -465,19 +495,7 @@ def main(argv: list[str] | None = None) -> int:
         report = run(root, document, arguments.profile, json_output=arguments.json)
         return 0 if report["status"] == "passed" else 1
     except (CheckError, OSError) as error:
-        if arguments.json:
-            print(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "status": "blocked",
-                        "diagnostics": str(error),
-                        "checks": [],
-                    }
-                )
-            )
-        else:
-            print(f"project-check: blocked: {error}", file=sys.stderr)
+        report_blocked(error, json_output=arguments.json)
         return 1
     except KeyboardInterrupt:
         return 130

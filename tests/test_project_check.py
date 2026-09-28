@@ -302,6 +302,78 @@ class ProjectCheckTests(unittest.TestCase):
                 checks.watch(root, json_output=True)
             self.assertEqual(run.call_count, 2)
 
+    def test_watch_recovers_after_temporary_invalid_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            document = {"checks": [], "watch_ignore": []}
+            snapshots = iter(
+                [
+                    {"manifest": 0},
+                    {"manifest": 1},
+                    {"manifest": 1},
+                    {"manifest": 2},
+                    {"manifest": 2},
+                ]
+            )
+            times = iter([0.0, 0.0, 0.6, 1.0, 1.0, 1.6])
+            output = io.StringIO()
+            with (
+                contextlib.redirect_stdout(output),
+                patch.object(
+                    checks,
+                    "load",
+                    side_effect=[
+                        document,
+                        checks.CheckError("incomplete manifest"),
+                        document,
+                    ],
+                ),
+                patch.object(
+                    checks, "snapshot", side_effect=lambda *_: next(snapshots)
+                ),
+                patch.object(checks.time, "monotonic", side_effect=lambda: next(times)),
+                patch.object(
+                    checks.time,
+                    "sleep",
+                    side_effect=[None, None, None, None, KeyboardInterrupt],
+                ),
+                patch.object(checks, "run") as run,
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                checks.watch(root, json_output=True)
+            self.assertEqual(run.call_count, 2)
+            self.assertIn("incomplete manifest", output.getvalue())
+
+    def test_watch_can_start_with_invalid_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            document = {"checks": [], "watch_ignore": []}
+            snapshots = iter([{"manifest": 0}, {"manifest": 1}, {"manifest": 1}])
+            times = iter([0.0, 0.0, 0.6])
+            output = io.StringIO()
+            with (
+                contextlib.redirect_stdout(output),
+                patch.object(
+                    checks,
+                    "load",
+                    side_effect=[checks.CheckError("incomplete manifest"), document],
+                ),
+                patch.object(
+                    checks, "snapshot", side_effect=lambda *_: next(snapshots)
+                ),
+                patch.object(checks.time, "monotonic", side_effect=lambda: next(times)),
+                patch.object(
+                    checks.time,
+                    "sleep",
+                    side_effect=[None, None, KeyboardInterrupt],
+                ),
+                patch.object(checks, "run") as run,
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                checks.watch(root, json_output=True)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
+
 
 if __name__ == "__main__":
     unittest.main()

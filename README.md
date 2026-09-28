@@ -19,6 +19,9 @@ their `.project-checks.json` at this installed runner instead of copying it.
 | `full` | Baseline plus every manifest check that declares `full`. |
 | `watch` | Re-runs `fast` whenever tracked/untracked source changes (batched). |
 
+Watch reports a temporarily invalid manifest as blocked and keeps monitoring.
+It resumes the fast checks after the manifest becomes valid again.
+
 Every run also reports a scanner coverage summary. Zero findings alone are not
 proof of coverage: a run with no supported source files or with parser errors
 never reports `passed`.
