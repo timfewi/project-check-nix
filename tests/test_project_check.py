@@ -302,6 +302,18 @@ class ProjectCheckTests(unittest.TestCase):
                 checks.watch(root, json_output=True)
             self.assertEqual(run.call_count, 2)
 
+    def test_watch_ignore_cannot_hide_manifest_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / checks.MANIFEST
+            manifest.write_text("initial")
+            (root / "generated").write_text("initial")
+            before = checks.snapshot(root, ["*"])
+            (root / "generated").write_text("changed")
+            self.assertEqual(before, checks.snapshot(root, ["*"]))
+            manifest.write_text("fixed manifest")
+            self.assertNotEqual(before, checks.snapshot(root, ["*"]))
+
     def test_watch_recovers_after_temporary_invalid_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

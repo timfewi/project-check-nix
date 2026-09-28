@@ -54,7 +54,8 @@ never reports `passed`.
 - `cwd` (optional) is a project-relative directory; it may not escape the project.
 - `timeout_seconds` bounds each check and kills its whole process group.
 - `profiles` is a nonempty subset of `fast` and `full`.
-- `watch_ignore` lists glob patterns excluded from change detection.
+- `watch_ignore` lists glob patterns excluded from change detection. The check
+  manifest is always watched so an invalid manifest can be repaired.
 
 Warnings fail an otherwise successful check. The exact Nix `warning: Git tree
 '…' is dirty` notice is retained as diagnostic context but is not a quality

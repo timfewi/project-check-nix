@@ -420,8 +420,9 @@ def snapshot(root: Path, patterns: list[str]) -> dict:
         for name in files:
             path = Path(directory) / name
             relative = str(path.relative_to(root))
-            if path.is_symlink() or any(
-                fnmatch.fnmatch(relative, pattern) for pattern in patterns
+            if path.is_symlink() or (
+                relative != MANIFEST
+                and any(fnmatch.fnmatch(relative, pattern) for pattern in patterns)
             ):
                 continue
             try:
