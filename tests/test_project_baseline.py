@@ -44,8 +44,8 @@ class ProjectBaselineTests(unittest.TestCase):
             )
             for report, status in cases:
 
-                def scan(*_arguments):
-                    (root / "semgrep.json").write_text(json.dumps(report))
+                def scan(*_arguments, _report=report):
+                    (root / "semgrep.json").write_text(json.dumps(_report))
                     return {"name": "baseline", "status": "passed", "diagnostics": ""}
 
                 with (
@@ -80,7 +80,14 @@ class ProjectBaselineTests(unittest.TestCase):
             root = Path(directory)
             for findings, errors, runner_status, expected in cases:
 
-                def scan(_root, check, _scratch):
+                def scan(
+                    _root,
+                    check,
+                    _scratch,
+                    _findings=findings,
+                    _errors=errors,
+                    _runner_status=runner_status,
+                ):
                     argv = check["argv"]
                     self.assertIn("--no-rewrite-rule-ids", argv)
                     exclusions = [
@@ -96,14 +103,14 @@ class ProjectBaselineTests(unittest.TestCase):
                         json.dumps(
                             {
                                 "paths": {"scanned": ["tests/test_real.py"]},
-                                "results": findings,
-                                "errors": errors,
+                                "results": _findings,
+                                "errors": _errors,
                             }
                         )
                     )
                     return {
                         "name": "baseline",
-                        "status": runner_status,
+                        "status": _runner_status,
                         "diagnostics": "",
                     }
 

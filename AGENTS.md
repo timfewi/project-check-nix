@@ -13,8 +13,9 @@
   changed ruleset is a changed store hash.
 - Run `project-check fast`, or its declared `bash scripts/check fast` entrypoint
   when the runner is unavailable. That gate runs the Nix formatter,
-  `nix flake check --no-build` and the Python unit tests. The `quality-rules`
-  Semgrep check is opt-in: run it when the portable rules or fixtures change.
+  `nix flake check --no-build`, Ruff lint/format and the Python unit tests. The
+  `quality-rules` Semgrep check is opt-in: run it when the portable rules or
+  fixtures change.
 - Do not stage, commit, push, activate, deploy, install, or rewrite history
   without explicit authorization.
 - Keep operator identities, personal checkout paths, device labels and account

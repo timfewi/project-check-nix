@@ -131,9 +131,9 @@ liteRuntime.extraPackages = [ inputs.project-check.packages.x86_64-linux.project
 ## Checks
 
 - `nix build .#project-check` builds the runner.
-- `nix build .#checks.x86_64-linux.python-tests` runs the contract unit tests
-  (fast, no scanner).
+- `nix build .#checks.x86_64-linux.python-tests` runs Ruff lint/format and the
+  contract unit tests (fast, no scanner).
 - `nix build .#checks.x86_64-linux.quality-rules` round-trips the portable rules
   against their fixtures with the real Semgrep scanner (opt-in, builds Semgrep).
-- `bash scripts/check fast` runs the formatter, `nix flake check --no-build` and
-  the Python unit tests.
+- `bash scripts/check fast` runs the Nix formatter, `nix flake check --no-build`,
+  Ruff lint/format and the Python unit tests.

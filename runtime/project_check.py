@@ -76,7 +76,11 @@ def load(root: Path) -> dict:
         document = json.loads((root / MANIFEST).read_text())
     except (OSError, ValueError) as error:
         raise CheckError(f"cannot read {MANIFEST}: {error}") from error
-    if not isinstance(document, dict) or document.get("version") != 1:
+    if (
+        not isinstance(document, dict)
+        or type(document.get("version")) is not int
+        or document["version"] != 1
+    ):
         raise CheckError("project checks require version 1")
     if set(document) - {"version", "checks", "watch_ignore"}:
         raise CheckError("unknown project-checks field")
@@ -232,7 +236,9 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
         result["status"] = "failed"
         result["diagnostics"] += "\nWarnings make this required check unsuccessful.\n"
     if result["status"] == "failed" and result["returncode"]:
-        result["diagnostics"] += f"\nCommand exited with status {result['returncode']}.\n"
+        result["diagnostics"] += (
+            f"\nCommand exited with status {result['returncode']}.\n"
+        )
     result["duration_seconds"] = round(time.monotonic() - started, 3)
     return result
 
@@ -311,7 +317,7 @@ def baseline(root: Path, scratch: Path) -> dict:
             or not isinstance(report.get("results"), list)
             or not isinstance(report.get("errors"), list)
         ):
-            raise ValueError("invalid scanner report")
+            raise TypeError("invalid scanner report")
         scanned = report["paths"]["scanned"]
         result["scanned_files"] = len(scanned)
         result["findings"] = report.get("results", [])

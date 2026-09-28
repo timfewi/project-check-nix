@@ -21,7 +21,7 @@ def load_report(path: Path) -> dict:
             f"scanner report is unavailable or invalid: {error}"
         ) from error
     if not isinstance(report, dict):
-        raise ValueError("scanner report must be a JSON object")
+        raise TypeError("scanner report must be a JSON object")
     return report
 
 
@@ -74,7 +74,7 @@ def main() -> None:
         rules = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".semgrep")
         fixtures = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("tests/semgrep")
         count = validate(report, rules, fixtures)
-    except (KeyError, ValueError) as error:
+    except (KeyError, TypeError, ValueError) as error:
         raise SystemExit(f"Semgrep rule tests failed: {error}") from error
     print(f"Semgrep rule tests: {count} rules passed positive and negative fixtures")
 

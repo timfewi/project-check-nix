@@ -25,10 +25,15 @@
         python-tests =
           pkgs.runCommand "project-check-python-tests"
             {
-              nativeBuildInputs = [ pkgs.python3 ];
+              nativeBuildInputs = [
+                pkgs.python3
+                pkgs.ruff
+              ];
             }
             ''
               cd ${self}
+              ruff check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
+              ruff format --check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
               python3 -m unittest discover -s tests -t . -p 'test_*.py' -v
               touch "$out"
             '';

@@ -12,6 +12,19 @@ from runtime import project_check as checks
 
 
 class ProjectCheckTests(unittest.TestCase):
+    def test_manifest_requires_integer_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for version in (True, 1.0, "1"):
+                with self.subTest(version=version):
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps(
+                            {"version": version, "checks": [self.check("ok", "")]}
+                        )
+                    )
+                    with self.assertRaisesRegex(checks.CheckError, "version 1"):
+                        checks.load(root)
+
     def test_omitted_cwd_defaults_to_project_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -142,7 +155,9 @@ class ProjectCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             result = checks.run_check(
-                root, self.check("missing", "", requires=["synthetic-missing-checker"]), root
+                root,
+                self.check("missing", "", requires=["synthetic-missing-checker"]),
+                root,
             )
             self.assertEqual(result["status"], "blocked")
             self.assertIn("synthetic-missing-checker", result["diagnostics"])
@@ -158,7 +173,9 @@ class ProjectCheckTests(unittest.TestCase):
                 with self.subTest(executable=executable):
                     result = checks.run_check(
                         root,
-                        self.check("start", "", argv=[executable, "sensitive-argument"]),
+                        self.check(
+                            "start", "", argv=[executable, "sensitive-argument"]
+                        ),
                         root,
                     )
                     self.assertEqual(result["status"], "blocked")
@@ -171,7 +188,9 @@ class ProjectCheckTests(unittest.TestCase):
             root = Path(directory)
             for code, status in ((126, "blocked"), (127, "blocked"), (23, "failed")):
                 with self.subTest(code=code):
-                    result = checks.run_check(root, self.check("shell", f"exit({code})"), root)
+                    result = checks.run_check(
+                        root, self.check("shell", f"exit({code})"), root
+                    )
                     self.assertEqual(result["status"], status)
                     self.assertEqual(result["returncode"], code)
                     self.assertIn(str(code), result["diagnostics"])
@@ -181,11 +200,24 @@ class ProjectCheckTests(unittest.TestCase):
     def test_environment_only_blockers_remain_blocked_in_text_and_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            document = {"checks": [self.check("missing", "", requires=["synthetic-missing-checker"])]}
+            document = {
+                "checks": [
+                    self.check("missing", "", requires=["synthetic-missing-checker"])
+                ]
+            }
             for json_output in (False, True):
                 output = io.StringIO()
-                with contextlib.redirect_stdout(output), patch.object(
-                    checks, "baseline", return_value={"name": "baseline", "status": "passed", "diagnostics": ""}
+                with (
+                    contextlib.redirect_stdout(output),
+                    patch.object(
+                        checks,
+                        "baseline",
+                        return_value={
+                            "name": "baseline",
+                            "status": "passed",
+                            "diagnostics": "",
+                        },
+                    ),
                 ):
                     report = checks.run(root, document, "fast", json_output=json_output)
                 self.assertEqual(report["status"], "blocked")
