@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -163,6 +164,194 @@ class ProjectCheckTests(unittest.TestCase):
             self.assertIn("synthetic-missing-checker", result["diagnostics"])
             self.assertIn("nix develop path:.", result["diagnostics"])
             self.assertIn("devShells", result["diagnostics"])
+
+    def test_plan_checks_prerequisites_without_running_project_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rules = root / "rules"
+            rules.mkdir()
+            (root / "work").mkdir()
+            script = root / "work" / "check"
+            script.write_text("#!/bin/sh\ntouch should-not-exist\n")
+            script.chmod(0o755)
+            document = {
+                "checks": [
+                    self.check(
+                        "ready",
+                        "secret-argument",
+                        argv=["./check", "secret-argument"],
+                        cwd="work",
+                    ),
+                    self.check(
+                        "missing",
+                        "",
+                        requires=["synthetic-missing-checker"],
+                    ),
+                    self.check("bad-cwd", "", cwd="gone"),
+                    self.check("full-only", "", profiles=["full"]),
+                ]
+            }
+            output = io.StringIO()
+            with (
+                patch.object(checks, "QUALITY_RULES", str(rules)),
+                patch.object(checks, "SEMGREP", sys.executable),
+                patch.object(
+                    checks, "run_check", side_effect=AssertionError("ran check")
+                ),
+                patch.object(
+                    checks, "baseline", side_effect=AssertionError("ran baseline")
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                report = checks.plan(root, document, "fast", json_output=True)
+            self.assertEqual(json.loads(output.getvalue()), report)
+            self.assertEqual(report["status"], "blocked")
+            self.assertEqual(
+                [(item["name"], item["status"]) for item in report["checks"]],
+                [
+                    ("baseline", "ready"),
+                    ("ready", "ready"),
+                    ("missing", "blocked"),
+                    ("bad-cwd", "blocked"),
+                ],
+            )
+            self.assertTrue(report["checks"][3]["cwd_unavailable"])
+            self.assertFalse((root / "work" / "should-not-exist").exists())
+            self.assertNotIn("secret-argument", output.getvalue())
+
+    def test_plan_cli_uses_read_only_path(self):
+        with (
+            patch.object(checks, "load", return_value={"checks": []}),
+            patch.object(checks, "plan", return_value={"status": "ready"}) as plan,
+            patch.object(checks, "run", side_effect=AssertionError("ran checks")),
+        ):
+            self.assertEqual(checks.main(["fast", "--plan", "--json"]), 0)
+        self.assertEqual(plan.call_args.args[2], "fast")
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            checks.main(["watch", "--plan"])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_plan_and_run_resolve_relative_requirements_from_check_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            work.mkdir()
+            program = work / "local-tool"
+            program.write_text("#!/bin/sh\nexit 0\n")
+            program.chmod(0o755)
+            rules = root / "rules"
+            rules.mkdir()
+            check = self.check(
+                "local-tool",
+                "",
+                argv=["./local-tool"],
+                cwd="work",
+                requires=["./local-tool"],
+            )
+            with (
+                patch.object(checks, "QUALITY_RULES", str(rules)),
+                patch.object(checks, "SEMGREP", sys.executable),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                report = checks.plan(root, {"checks": [check]}, "fast")
+            self.assertEqual(report["checks"][1]["status"], "ready")
+            self.assertEqual(checks.run_check(root, check, root)["status"], "passed")
+
+    def test_changed_plan_annotates_without_skipping_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rules = root / "rules"
+            rules.mkdir()
+            document = {
+                "checks": [
+                    self.check("code", "", input_paths=["src/"]),
+                    self.check("docs", "", input_paths=["docs/readme.md"]),
+                    self.check("other", "", input_paths=["other/"]),
+                    self.check("unmapped", ""),
+                ]
+            }
+            output = io.StringIO()
+            with (
+                patch.object(checks, "QUALITY_RULES", str(rules)),
+                patch.object(checks, "SEMGREP", sys.executable),
+                patch.object(
+                    checks,
+                    "changed_paths",
+                    return_value=["docs/readme.md", "src/main.py"],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                report = checks.plan(
+                    root, document, "fast", json_output=True, changed=True
+                )
+            self.assertEqual(json.loads(output.getvalue()), report)
+            self.assertEqual(
+                [item["relevance"] for item in report["checks"]],
+                ["required", "affected", "affected", "unaffected", "unknown"],
+            )
+            self.assertEqual(len(report["checks"]), 5)
+            self.assertTrue(report["change_scope"]["advisory_only"])
+            with (
+                patch.object(checks, "QUALITY_RULES", str(rules)),
+                patch.object(checks, "SEMGREP", sys.executable),
+                patch.object(checks, "changed_paths", return_value=[checks.MANIFEST]),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                changed_manifest = checks.plan(root, document, "fast", changed=True)
+            self.assertTrue(
+                all(
+                    item["relevance"] == "affected"
+                    for item in changed_manifest["checks"][1:]
+                )
+            )
+
+    def test_changed_paths_include_both_rename_sides_and_untracked(self):
+        status = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b"R  new.py\0old.py\0?? added.py\0",
+            stderr=b"",
+        )
+        with patch.object(checks.subprocess, "run", return_value=status) as process:
+            paths = checks.changed_paths(Path("."))
+        self.assertEqual(paths, ["added.py", "new.py", "old.py"])
+        self.assertIn("--no-optional-locks", process.call_args.args[0])
+        with (
+            patch.object(
+                checks.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 1, b"", b"not a repository"
+                ),
+            ),
+            self.assertRaisesRegex(checks.CheckError, "Git change list"),
+        ):
+            checks.changed_paths(Path("."))
+
+    def test_input_paths_reject_ambiguous_or_escaping_patterns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for path in ("../outside", "/absolute", "src/*", "src//file", "."):
+                with self.subTest(path=path):
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "checks": [self.check("code", "", input_paths=[path])],
+                            }
+                        )
+                    )
+                    with self.assertRaisesRegex(checks.CheckError, "input_paths"):
+                        checks.load(root)
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            checks.main(["fast", "--changed"])
+        self.assertEqual(error.exception.code, 2)
 
     def test_unavailable_program_reports_blocker_without_exposing_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

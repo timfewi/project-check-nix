@@ -96,6 +96,7 @@ def load(root: Path) -> dict:
             "requires",
             "timeout_seconds",
             "profiles",
+            "input_paths",
         }:
             raise CheckError("invalid check fields")
         name = check.get("name")
@@ -136,6 +137,20 @@ def load(root: Path) -> dict:
             raise CheckError(f"{name}: cwd must be relative without parent traversal")
         if not (root / cwd).resolve().is_relative_to(root):
             raise CheckError(f"{name}: cwd escapes the project")
+        inputs = check.get("input_paths")
+        if inputs is not None:
+            strings(inputs, f"{name}.input_paths")
+            if any(
+                path.startswith("/")
+                or path == "."
+                or ".." in Path(path).parts
+                or Path(path.removesuffix("/")).as_posix() != path.removesuffix("/")
+                or any(char in path for char in "*?[\\")
+                for path in inputs
+            ):
+                raise CheckError(
+                    f"{name}.input_paths must be exact relative paths or directories ending in /"
+                )
     ignore = document.get("watch_ignore", [])
     if not isinstance(ignore, list) or not all(
         isinstance(item, str) for item in ignore
@@ -153,6 +168,16 @@ def stop(process: subprocess.Popen) -> None:
     process.wait()
 
 
+def program_available(program: str, cwd: Path) -> bool:
+    """Resolve explicit paths where the check will run; otherwise use PATH."""
+    if "/" in program:
+        path = Path(program)
+        if not path.is_absolute():
+            path = cwd / path
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(program) is not None
+
+
 def run_check(root: Path, check: dict, scratch: Path) -> dict:
     result = {
         "name": check["name"],
@@ -160,16 +185,16 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
         "returncode": None,
         "diagnostics": "",
     }
-    missing = [name for name in check["requires"] if shutil.which(name) is None]
-    if missing:
-        result["diagnostics"] = (
-            "missing required programs: " + ", ".join(missing) + "\n" + TOOLCHAIN_HINT
-        )
-        return result
     cwd = (root / check["cwd"]).resolve()
     if not cwd.is_relative_to(root) or not cwd.is_dir():
         result["diagnostics"] = (
             "working directory is unavailable or escapes the project"
+        )
+        return result
+    missing = [name for name in check["requires"] if not program_available(name, cwd)]
+    if missing:
+        result["diagnostics"] = (
+            "missing required programs: " + ", ".join(missing) + "\n" + TOOLCHAIN_HINT
         )
         return result
     environment = dict(os.environ)
@@ -243,13 +268,18 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     return result
 
 
-def baseline(root: Path, scratch: Path) -> dict:
-    """Run the immutable portable pack and require explicit coverage evidence."""
+def baseline_tooling() -> tuple[Path, str]:
     rules = Path(QUALITY_RULES)
     scanner = SEMGREP
     if QUALITY_RULES.startswith("@"):
         rules = Path(__file__).resolve().parent.parent / ".semgrep" / "portable"
         scanner = shutil.which("semgrep") or "semgrep"
+    return rules, scanner
+
+
+def baseline(root: Path, scratch: Path) -> dict:
+    """Run the immutable portable pack and require explicit coverage evidence."""
+    rules, scanner = baseline_tooling()
     report_path = scratch / "semgrep.json"
     check = {
         "name": "baseline",
@@ -402,6 +432,152 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
     return report
 
 
+def changed_paths(root: Path) -> list[str]:
+    """Read stable NUL-delimited Git status, including both sides of renames."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            cwd=root,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CheckError("cannot inspect Git changes") from error
+    if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
+        raise CheckError("Git change list unavailable or too large")
+    if result.stdout and not result.stdout.endswith(b"\0"):
+        raise CheckError("incomplete Git status output")
+    records = result.stdout.split(b"\0")
+    paths = set()
+    index = 0
+    while index < len(records) - 1:
+        record = records[index]
+        if len(record) < 4 or record[2:3] != b" ":
+            raise CheckError("invalid Git status record")
+        names = [record[3:]]
+        if b"R" in record[:2] or b"C" in record[:2]:
+            index += 1
+            if index >= len(records) - 1:
+                raise CheckError("incomplete Git rename record")
+            names.append(records[index])
+        try:
+            paths.update(name.decode("utf-8") for name in names)
+        except UnicodeDecodeError as error:
+            raise CheckError("non-UTF-8 Git path is unsupported") from error
+        index += 1
+    return sorted(paths)
+
+
+def relevance(check: dict, paths: list[str]) -> dict:
+    if any(path in {MANIFEST, "flake.nix", "flake.lock"} for path in paths):
+        return {
+            "relevance": "affected",
+            "matched_total": 0,
+            "matched_examples": ["check or toolchain declaration changed"],
+        }
+    inputs = check.get("input_paths")
+    if inputs is None:
+        return {"relevance": "unknown", "matched_total": 0, "matched_examples": []}
+    matched = [
+        path
+        for path in paths
+        if any(
+            path.startswith(item) if item.endswith("/") else path == item
+            for item in inputs
+        )
+    ]
+    return {
+        "relevance": "affected" if matched else "unaffected",
+        "matched_total": len(matched),
+        "matched_examples": matched[:10],
+    }
+
+
+def plan(
+    root: Path,
+    document: dict,
+    profile: str,
+    *,
+    json_output: bool = False,
+    changed: bool = False,
+) -> dict:
+    """Report selected checks and local prerequisites without running them."""
+
+    rules, scanner = baseline_tooling()
+    paths = changed_paths(root) if changed else []
+
+    checks = []
+    baseline_missing = [] if program_available(scanner, root) else [scanner]
+    checks.append(
+        {
+            "name": "baseline",
+            "status": "ready" if not baseline_missing and rules.is_dir() else "blocked",
+            "missing_programs": baseline_missing,
+            "cwd_unavailable": False,
+            "rules_unavailable": not rules.is_dir(),
+        }
+    )
+    if changed:
+        checks[0].update(
+            {"relevance": "required", "matched_total": 0, "matched_examples": []}
+        )
+    for check in document["checks"]:
+        if profile not in check["profiles"]:
+            continue
+        cwd = (root / check["cwd"]).resolve()
+        cwd_unavailable = not cwd.is_relative_to(root) or not cwd.is_dir()
+        programs = dict.fromkeys([check["argv"][0], *check["requires"]])
+        missing = [name for name in programs if not program_available(name, cwd)]
+        check_plan = {
+            "name": check["name"],
+            "status": "blocked" if missing or cwd_unavailable else "ready",
+            "missing_programs": missing,
+            "cwd_unavailable": cwd_unavailable,
+            "timeout_seconds": check["timeout_seconds"],
+        }
+        if changed:
+            check_plan.update(relevance(check, paths))
+        checks.append(check_plan)
+    report = {
+        "version": 1,
+        "mode": "plan",
+        "profile": profile,
+        "status": "blocked"
+        if any(c["status"] == "blocked" for c in checks)
+        else "ready",
+        "checks": checks,
+    }
+    if changed:
+        report["change_scope"] = {
+            "corpus": "Git tracked and untracked paths; ignored paths excluded",
+            "total": len(paths),
+            "examples": paths[:20],
+            "advisory_only": True,
+        }
+    if json_output:
+        print(json.dumps(report), flush=True)
+    else:
+        for check in checks:
+            problems = list(check["missing_programs"])
+            if check["cwd_unavailable"]:
+                problems.append("working directory unavailable")
+            if check.get("rules_unavailable"):
+                problems.append("portable rules unavailable")
+            detail = f" ({', '.join(problems)})" if problems else ""
+            change = f" [{check['relevance']}]" if changed else ""
+            print(f"{check['status']}: {check['name']}{change}{detail}")
+        print(f"project-check plan {profile}: {report['status']}", flush=True)
+    return report
+
+
 def snapshot(root: Path, patterns: list[str]) -> dict:
     result = {}
     for directory, directories, files in os.walk(root, followlinks=False):
@@ -485,14 +661,37 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=("baseline", "fast", "full", "watch"))
     parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="inspect prerequisites without running checks",
+    )
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="annotate a plan with Git change relevance",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="emit JSON (JSON lines in watch mode)"
     )
     arguments = parser.parse_args(argv)
+    if arguments.plan and arguments.profile == "watch":
+        parser.error("--plan does not support watch")
+    if arguments.changed and not arguments.plan:
+        parser.error("--changed requires --plan")
     root = Path.cwd().resolve()
     try:
         if arguments.profile == "watch":
             return watch(root, json_output=arguments.json)
         document = {"checks": []} if arguments.profile == "baseline" else load(root)
+        if arguments.plan:
+            report = plan(
+                root,
+                document,
+                arguments.profile,
+                json_output=arguments.json,
+                changed=arguments.changed,
+            )
+            return 0 if report["status"] == "ready" else 1
         report = run(root, document, arguments.profile, json_output=arguments.json)
         return 0 if report["status"] == "passed" else 1
     except (CheckError, OSError) as error:

@@ -19,6 +19,21 @@ their `.project-checks.json` at this installed runner instead of copying it.
 | `full` | Baseline plus every manifest check that declares `full`. |
 | `watch` | Re-runs `fast` whenever tracked/untracked source changes (batched). |
 
+Use `project-check fast --plan` (or `full --plan`) to list the selected checks
+and inspect local executable, rules and working-directory availability before a
+run. Add `--json` for a machine-readable report. Planning reads the manifest
+and filesystem only; it never runs the baseline scanner or project commands.
+Its `ready` status means prerequisites are present, not that checks passed. The
+report names missing programs but omits command arguments.
+
+`project-check fast --plan --changed` adds advisory relevance from Git's tracked
+and untracked paths. A check with `input_paths` is marked affected when a changed
+path matches; an unmapped check is `unknown`. The baseline is always required,
+and changing `.project-checks.json`, `flake.nix` or `flake.lock` marks every
+check affected. The plan **never skips checks** and does not change `fast` or
+`full` execution. Git ignored paths are outside this change view; unavailable
+Git status blocks the changed plan. `--changed` requires `--plan`.
+
 Watch reports a temporarily invalid manifest as blocked and keeps monitoring.
 It resumes the fast checks after the manifest becomes valid again.
 
@@ -38,6 +53,7 @@ never reports `passed`.
       "name": "format",
       "argv": ["nix", "fmt", "--no-write-lock-file", "--", "--ci"],
       "requires": ["nix"],
+      "input_paths": ["flake.nix", "src/"],
       "timeout_seconds": 60,
       "profiles": ["fast"]
     }
@@ -49,11 +65,14 @@ never reports `passed`.
 - `name` is a unique lowercase identifier.
 - `argv` is a nonempty string array; the first entry is the program. Nothing is
   passed through a shell.
-- `requires` lists programs that must be on `PATH`; a missing one marks the check
-  `blocked`, not failed.
+- `requires` lists programs that must be on `PATH`; explicit relative paths
+  resolve from the check's `cwd`. A missing one marks the check `blocked`, not failed.
 - `cwd` (optional) is a project-relative directory; it may not escape the project.
 - `timeout_seconds` bounds each check and kills its whole process group.
 - `profiles` is a nonempty subset of `fast` and `full`.
+- `input_paths` (optional) lists exact project-relative files or directories
+  ending in `/` for the advisory changed plan. Omit it when scope is unknown;
+  wildcards and parent traversal are rejected.
 - `watch_ignore` lists glob patterns excluded from change detection. The check
   manifest is always watched so an invalid manifest can be repaired.
 
