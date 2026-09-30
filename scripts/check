@@ -6,7 +6,8 @@ if [[ "${1:-}" != fast || "$#" -ne 1 ]]; then
   exit 2
 fi
 mapfile -d '' -t nix_files < <(git ls-files --cached --others --exclude-standard -z -- '*.nix')
-nix run --no-write-lock-file path:.#formatter.x86_64-linux -- --check "${nix_files[@]}"
-nix flake check --no-write-lock-file --no-build path:.
+nix fmt --no-write-lock-file -- --check "${nix_files[@]}"
+nix flake check --all-systems --no-write-lock-file --no-build path:.
+project_check_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
 exec nix build --no-link --max-jobs 1 --cores 2 --no-write-lock-file \
-  path:.#checks.x86_64-linux.python-tests
+  "path:.#checks.$project_check_system.python-tests"

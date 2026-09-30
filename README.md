@@ -3,6 +3,9 @@
 Portable, argv-only project verification runner. It reads a per-repository
 `.project-checks.json` manifest and runs the declared commands with pinned,
 explicit arguments — never implicit project discovery or shell evaluation.
+Packages, formatters and checks are exported for `x86_64-linux` and
+`aarch64-linux`; the fast gate selects the running machine's platform and
+evaluates both platforms without building the scanner.
 
 This repository is the standalone packaging of the shared `project-check` runner
 previously embedded in the `example-host` toolchain. New repositories point
@@ -133,10 +136,13 @@ in a normal terminal, independently of an agent's toolbox:
 ```nix
 inputs.project-check.inputs.nixpkgs.follows = "nixpkgs";
 # Include project-check in the outputs function's arguments.
-devShells.x86_64-linux.default = pkgs.mkShell {
-  packages = [ project-check.packages.x86_64-linux.project-check ];
+devShells.${system}.default = pkgs.mkShell {
+  packages = [ project-check.packages.${system}.project-check ];
 };
 ```
+
+Here `system` is the platform of the surrounding per-system outputs block;
+use the same value for its `pkgs` and the runner package.
 
 Keep `flake.lock` reviewed and pinned. New `repo-scaffold-nix` templates include
 this dependency and forward `just lint --json` to `project-check fast --json`.
@@ -145,10 +151,14 @@ Existing projects need a deliberate flake/Justfile update.
 Host and agent-only installations are also supported:
 
 ```nix
-environment.systemPackages = [ inputs.project-check.packages.x86_64-linux.project-check ];
+environment.systemPackages = [
+  inputs.project-check.packages.${pkgs.stdenv.hostPlatform.system}.project-check
+];
 
 # Or, inside the lite sandbox, where the minimal PATH excludes the home profile:
-liteRuntime.extraPackages = [ inputs.project-check.packages.x86_64-linux.project-check ];
+liteRuntime.extraPackages = [
+  inputs.project-check.packages.${pkgs.stdenv.hostPlatform.system}.project-check
+];
 ```
 
 ## Checks
@@ -160,3 +170,9 @@ liteRuntime.extraPackages = [ inputs.project-check.packages.x86_64-linux.project
   against their fixtures with the real Semgrep scanner (opt-in, builds Semgrep).
 - `bash scripts/check fast` runs the Nix formatter, `nix flake check --no-build`,
   Ruff lint/format and the Python unit tests.
+
+The 2026-09-30 portability review passed the fast gate, including 25 runner
+contract tests in the native Nix unit check, and evaluated both Linux output
+sets. ShellCheck, deadnix, statix and the tracked-source privacy scan passed.
+ARM64 execution and the opt-in Semgrep replay were not run; source input pins
+and portable rule contents are unchanged.

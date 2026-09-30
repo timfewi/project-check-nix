@@ -6,45 +6,61 @@
   outputs =
     { self, nixpkgs }:
     let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
-      projectCheck = pkgs.callPackage ./packages/project-check.nix { };
-      qualityRules = pkgs.callPackage ./packages/quality-rules.nix { };
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      packages.${system} = {
-        default = projectCheck;
-        project-check = projectCheck;
-        quality-rules = qualityRules;
-      };
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          projectCheck = pkgs.callPackage ./packages/project-check.nix { };
+          qualityRules = pkgs.callPackage ./packages/quality-rules.nix { };
+        in
+        {
+          default = projectCheck;
+          project-check = projectCheck;
+          quality-rules = qualityRules;
+        }
+      );
 
-      checks.${system} = {
-        # Unit tests exercise the runner contract (argv handling, timeouts,
-        # missing tools, baseline report parsing, watch batching) without a
-        # scanner, so the fast gate stays cheap.
-        python-tests =
-          pkgs.runCommand "project-check-python-tests"
-            {
-              nativeBuildInputs = [
-                pkgs.python3
-                pkgs.ruff
-              ];
-            }
-            ''
-              cd ${self}
-              ruff check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
-              ruff format --check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
-              python3 -m unittest discover -s tests -t . -p 'test_*.py' -v
-              touch "$out"
-            '';
-        # Round-trips the immutable portable rules against their positive and
-        # negative fixtures through the real Semgrep scanner. Opt-in: it builds
-        # Semgrep.
-        quality-rules = pkgs.callPackage ./packages/quality-rules-check.nix {
-          inherit qualityRules;
-        };
-      };
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          qualityRules = pkgs.callPackage ./packages/quality-rules.nix { };
+        in
+        {
+          # Unit tests exercise the runner contract (argv handling, timeouts,
+          # missing tools, baseline report parsing, watch batching) without a
+          # scanner, so the fast gate stays cheap.
+          python-tests =
+            pkgs.runCommand "project-check-python-tests"
+              {
+                nativeBuildInputs = [
+                  pkgs.python3
+                  pkgs.ruff
+                ];
+              }
+              ''
+                cd ${self}
+                ruff check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
+                ruff format --check --no-cache runtime tests/test_*.py scripts/check-semgrep-tests.py
+                python3 -m unittest discover -s tests -t . -p 'test_*.py' -v
+                touch "$out"
+              '';
+          # Round-trips the immutable portable rules against their positive and
+          # negative fixtures through the real Semgrep scanner. Opt-in: it builds
+          # Semgrep.
+          quality-rules = pkgs.callPackage ./packages/quality-rules-check.nix {
+            inherit qualityRules;
+          };
+        }
+      );
 
-      formatter.${system} = pkgs.nixfmt;
+      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
     };
 }
