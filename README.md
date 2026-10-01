@@ -88,6 +88,13 @@ failure: checking uncommitted edits is the normal workflow. Undeclared
 compiler/linter warnings and warning counts still fail the check; exceptions
 cannot overrule a nonzero exit status.
 
+Each check captures at most 4 MiB of combined stdout and stderr. Exceeding that
+limit stops the check's own process group and reports `failed`, retaining the
+bounded prefix with an explicit truncation diagnostic (`output_truncated` in
+JSON). Partial output cannot prove success or turn an overflow into an
+environment blocker. The remaining checks still run. The timeout also applies
+when a check closes its output or a descendant keeps its output pipe open.
+
 A check may declare a known, intentional diagnostic:
 
 ```json
@@ -216,3 +223,13 @@ dependencies were already present. That package also passed the real runtime
 fast gate with four declared MicroVM notices retained in its report. Source
 input pins and baseline rules are unchanged; no scanner rebuild, ARM64
 execution, optional replay or host installation ran.
+
+The 2026-10-02 output-bound review reproduced an unchecked output overflow and
+passed the fast gate with 32 native contract tests, Ruff and both Linux output
+evaluations. Regressions cover benign and warning-bearing overflow, environment
+diagnostics in a truncated prefix, exact-boundary capture and timeout after
+closed output. Cleanup also signals each owned process group only once. The
+packaged CLI rejected a 4 MiB overflow while completing the
+following check; its real Python baseline passed. Deadnix and statix passed.
+Rules, dependencies and manifest fields are unchanged. No full scanner replay,
+ARM64 execution or host installation ran.

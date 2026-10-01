@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
@@ -18,6 +19,7 @@ from collections import Counter
 from pathlib import Path
 
 MANIFEST = ".project-checks.json"
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 QUALITY_RULES = "@qualityRules@"
 SEMGREP = "@semgrep@"
 CA_CERT_FILE = "@cacert@/etc/ssl/certs/ca-bundle.crt"
@@ -219,6 +221,42 @@ def program_available(program: str, cwd: Path) -> bool:
     return shutil.which(program) is not None
 
 
+def collect_output(process: subprocess.Popen, output, timeout: float) -> str | None:
+    """Bound both output storage and waiting, including inherited child pipes."""
+    deadline = time.monotonic() + timeout
+    cleaned_up = False
+    try:
+        with process.stdout, selectors.DefaultSelector() as poller:
+            poller.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                if process.poll() is not None and not cleaned_up:
+                    stop(process)
+                    cleaned_up = True
+                if not poller.get_map():
+                    try:
+                        process.wait(timeout=max(0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        return "timeout"
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "timeout"
+                for key, _ in poller.select(min(remaining, 0.1)):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        poller.unregister(key.fileobj)
+                        continue
+                    room = MAX_OUTPUT_BYTES - output.tell()
+                    output.write(chunk[:room])
+                    if len(chunk) > room:
+                        return "output limit"
+    finally:
+        # Never signal an old process-group id again after cleanup: a long
+        # inherited-pipe wait could outlive that id and permit its reuse.
+        if not cleaned_up:
+            stop(process)
+
+
 def run_check(root: Path, check: dict, scratch: Path) -> dict:
     result = {
         "name": check["name"],
@@ -261,7 +299,7 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
                 cwd=cwd,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=output,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
@@ -270,21 +308,22 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
                 f"runner could not start {check['argv'][0]!r}: {error}\n{TOOLCHAIN_HINT}"
             )
             return result
-        try:
-            process.wait(timeout=check["timeout_seconds"])
-        except subprocess.TimeoutExpired:
-            stop(process)
+        capture_error = collect_output(process, output, check["timeout_seconds"])
+        if capture_error == "timeout":
             result["diagnostics"] = (
                 f"timeout after {check['timeout_seconds']} seconds\n"
             )
-        except BaseException:
-            stop(process)
-            raise
+        elif capture_error:
+            result["returncode"] = process.returncode
+            result["status"] = "failed"
+            result["output_truncated"] = True
+            result["diagnostics"] = (
+                f"output limit exceeded ({MAX_OUTPUT_BYTES} bytes); "
+                "partial diagnostics cannot establish a passing check\n"
+            )
         else:
             result["returncode"] = process.returncode
             result["status"] = "passed" if process.returncode == 0 else "failed"
-            # A completed check must not leave background descendants for watch.
-            stop(process)
         output.seek(0)
         diagnostics = output.read().decode("utf-8", errors="replace")
     result["diagnostics"] += diagnostics
@@ -308,7 +347,11 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
                 result["diagnostics"] += (
                     "Expected diagnostic occurrence limit exceeded.\n"
                 )
-    if result["returncode"] in (126, 127):
+    if result.get("output_truncated"):
+        # Incomplete output cannot downgrade a real overflow into an
+        # environment blocker, even if its prefix contains that diagnostic.
+        result["status"] = "failed"
+    elif result["returncode"] in (126, 127):
         result["status"] = "blocked"
         result["diagnostics"] += (
             f"\nCommand unavailable (exit {result['returncode']}).\n{TOOLCHAIN_HINT}\n"

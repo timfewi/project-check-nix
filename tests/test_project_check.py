@@ -119,6 +119,72 @@ class ProjectCheckTests(unittest.TestCase):
             self.assertEqual(report["checks"][1]["returncode"], 3)
             self.assertIn("timeout", report["checks"][4]["diagnostics"])
 
+    def test_excessive_output_fails_without_accepting_partial_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for prefix in (
+                "",
+                "warning: late finding\n",
+                "required command not found\n",
+            ):
+                with self.subTest(prefix=prefix):
+                    check = self.check(
+                        "noisy",
+                        f"import os; os.write(2, {prefix.encode()!r}); "
+                        "os.write(1, b'x' * 65536)",
+                    )
+                    with patch.object(checks, "MAX_OUTPUT_BYTES", 8192):
+                        result = checks.run_check(root, check, root)
+                    self.assertEqual(result["status"], "failed")
+                    self.assertTrue(result["output_truncated"])
+                    self.assertTrue("output limit" in result["diagnostics"])
+                    self.assertLess(len(result["diagnostics"]), 9000)
+            self.assertEqual(
+                checks.run_check(root, self.check("next", "print('done')"), root)[
+                    "status"
+                ],
+                "passed",
+            )
+
+    def test_output_limit_preserves_complete_output_at_the_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            check = self.check("boundary", "import os; os.write(1, b'x' * 4096)")
+            with patch.object(checks, "MAX_OUTPUT_BYTES", 4096):
+                result = checks.run_check(root, check, root)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["diagnostics"], "x" * 4096)
+            self.assertNotIn("output_truncated", result)
+
+    def test_closed_output_does_not_bypass_the_process_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            check = self.check(
+                "closed-output",
+                "import os, time; os.close(1); os.close(2); time.sleep(30)",
+                timeout_seconds=0.1,
+            )
+            result = checks.run_check(root, check, root)
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("timeout", result["diagnostics"])
+            self.assertLess(result["duration_seconds"], 2)
+
+    def test_completed_output_cleans_the_process_group_only_once(self):
+        with (
+            tempfile.TemporaryFile() as output,
+            subprocess.Popen(
+                [sys.executable, "-c", "print('done')"],
+                stdout=subprocess.PIPE,
+                start_new_session=True,
+            ) as process,
+            patch.object(checks, "stop", wraps=checks.stop) as cleanup,
+        ):
+            process.wait(timeout=2)
+            self.assertIsNone(checks.collect_output(process, output, 2))
+            cleanup.assert_called_once_with(process)
+            output.seek(0)
+            self.assertEqual(output.read(), b"done\n")
+
     def test_contract_rejects_escapes_invalid_timeout_and_duplicate_names(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
