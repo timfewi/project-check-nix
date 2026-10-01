@@ -76,13 +76,42 @@ never reports `passed`.
 - `input_paths` (optional) lists exact project-relative files or directories
   ending in `/` for the advisory changed plan. Omit it when scope is unknown;
   wildcards and parent traversal are rejected.
+- `expected_warnings` (optional) declares exact warning lines with a reason and
+  an occurrence limit, as described below. Older runners reject this field;
+  update the selected runner before adopting it.
 - `watch_ignore` lists glob patterns excluded from change detection. The check
   manifest is always watched so an invalid manifest can be repaired.
 
 Warnings fail an otherwise successful check. The exact Nix `warning: Git tree
 '…' is dirty` notice is retained as diagnostic context but is not a quality
-failure: checking uncommitted edits is the normal workflow. Compiler/linter
-warnings, warning counts and nonzero exit statuses still fail the check.
+failure: checking uncommitted edits is the normal workflow. Undeclared
+compiler/linter warnings and warning counts still fail the check; exceptions
+cannot overrule a nonzero exit status.
+
+A check may declare a known, intentional diagnostic:
+
+```json
+"expected_warnings": [{
+  "message": "evaluation warning: optional synthetic transport is disabled",
+  "reason": "This isolated fixture deliberately disables the transport.",
+  "max_count": 1
+}]
+```
+
+Add this field to the owning check. Matching uses the complete output line,
+including whitespace, with no regex, wildcard or substring matching. The
+original diagnostic stays visible; text and JSON results report the reason,
+observed count and limit. Zero occurrences are allowed. Additional warning
+lines, counts above the limit, nonzero exits and environment blockers keep
+their normal failure/blocker behavior. Exceptions do not apply to the immutable
+baseline scanner.
+
+The manifest accepts at most 32 distinct expected warning lines per check.
+Each entry requires exactly `message`, `reason` and `max_count`; both text fields
+must be nonempty single lines of at most 4096 characters, the message must
+contain a recognized warning marker, and the limit must be an integer from 1
+to 100. The read-only plan includes every declaration for review before running
+project commands.
 
 Missing requirements, process-start errors and shell exit codes 126/127 report
 `blocked`, with instructions to enter `nix develop path:.` or repair the declared
@@ -176,3 +205,14 @@ contract tests in the native Nix unit check, and evaluated both Linux output
 sets. ShellCheck, deadnix, statix and the tracked-source privacy scan passed.
 ARM64 execution and the opt-in Semgrep replay were not run; source input pins
 and portable rule contents are unchanged.
+
+The 2026-10-01 expected-diagnostic review passed `project-check fast` with 28
+native contract tests, Ruff and Nix evaluation for both Linux platforms. The
+exact-line regression failed before the change, then passed with coverage for
+additional warnings, count overflow, nonzero exits, blockers and timeouts.
+ShellCheck, deadnix, statix and a complete tracked-source privacy scan passed
+with zero findings. Only the small runner script package was built; its
+dependencies were already present. That package also passed the real runtime
+fast gate with four declared MicroVM notices retained in its report. Source
+input pins and baseline rules are unchanged; no scanner rebuild, ARM64
+execution, optional replay or host installation ran.

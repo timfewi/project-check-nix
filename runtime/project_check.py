@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 MANIFEST = ".project-checks.json"
@@ -97,6 +98,7 @@ def load(root: Path) -> dict:
             "timeout_seconds",
             "profiles",
             "input_paths",
+            "expected_warnings",
         }:
             raise CheckError("invalid check fields")
         name = check.get("name")
@@ -150,6 +152,45 @@ def load(root: Path) -> dict:
             ):
                 raise CheckError(
                     f"{name}.input_paths must be exact relative paths or directories ending in /"
+                )
+        expected = check.get("expected_warnings", [])
+        if not isinstance(expected, list) or len(expected) > 32:
+            raise CheckError(
+                f"{name}.expected_warnings must be an array of at most 32 entries"
+            )
+        messages = set()
+        for entry in expected:
+            if not isinstance(entry, dict) or set(entry) != {
+                "message",
+                "reason",
+                "max_count",
+            }:
+                raise CheckError(
+                    f"{name}.expected_warnings require message, reason and max_count"
+                )
+            if any(
+                not isinstance(text, str)
+                or not text.strip()
+                or len(text) > 4096
+                or len(text.splitlines()) != 1
+                or "\0" in text
+                for text in (entry["message"], entry["reason"])
+            ):
+                raise CheckError(
+                    f"{name}.expected_warnings require bounded, nonempty single-line text"
+                )
+            message = entry["message"]
+            if not WARNING.search(message) or message in messages:
+                raise CheckError(
+                    f"{name}.expected_warnings require distinct warning lines"
+                )
+            messages.add(message)
+            if (
+                type(entry["max_count"]) is not int
+                or not 1 <= entry["max_count"] <= 100
+            ):
+                raise CheckError(
+                    f"{name}.expected_warnings max_count must be an integer between 1 and 100"
                 )
     ignore = document.get("watch_ignore", [])
     if not isinstance(ignore, list) or not all(
@@ -247,6 +288,26 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
         output.seek(0)
         diagnostics = output.read().decode("utf-8", errors="replace")
     result["diagnostics"] += diagnostics
+    warnings = Counter(
+        line
+        for line in diagnostics.splitlines()
+        if WARNING.search(line) and not NIX_DIRTY_NOTICE.fullmatch(line)
+    )
+    allowed = {}
+    if check.get("expected_warnings"):
+        result["expected_warnings"] = []
+        for expected in check["expected_warnings"]:
+            count = warnings[expected["message"]]
+            result["expected_warnings"].append({**expected, "count": count})
+            result["diagnostics"] += (
+                f"\nExpected diagnostic ({count}/{expected['max_count']} occurrences): "
+                f"{expected['reason']}\n"
+            )
+            allowed[expected["message"]] = expected["max_count"]
+            if count > expected["max_count"]:
+                result["diagnostics"] += (
+                    "Expected diagnostic occurrence limit exceeded.\n"
+                )
     if result["returncode"] in (126, 127):
         result["status"] = "blocked"
         result["diagnostics"] += (
@@ -255,8 +316,7 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     elif ENVIRONMENT_FAILURE.search(diagnostics):
         result["status"] = "blocked"
     elif result["status"] == "passed" and any(
-        WARNING.search(line) and not NIX_DIRTY_NOTICE.fullmatch(line)
-        for line in diagnostics.splitlines()
+        count > allowed.get(line, 0) for line, count in warnings.items()
     ):
         result["status"] = "failed"
         result["diagnostics"] += "\nWarnings make this required check unsuccessful.\n"
@@ -543,6 +603,8 @@ def plan(
             "cwd_unavailable": cwd_unavailable,
             "timeout_seconds": check["timeout_seconds"],
         }
+        if check.get("expected_warnings"):
+            check_plan["expected_warnings"] = check["expected_warnings"]
         if changed:
             check_plan.update(relevance(check, paths))
         checks.append(check_plan)
@@ -574,6 +636,11 @@ def plan(
             detail = f" ({', '.join(problems)})" if problems else ""
             change = f" [{check['relevance']}]" if changed else ""
             print(f"{check['status']}: {check['name']}{change}{detail}")
+            for expected in check.get("expected_warnings", []):
+                print(
+                    f"  expected diagnostic (at most {expected['max_count']} occurrences): "
+                    f"{expected['message']}\n  reason: {expected['reason']}"
+                )
         print(f"project-check plan {profile}: {report['status']}", flush=True)
     return report
 

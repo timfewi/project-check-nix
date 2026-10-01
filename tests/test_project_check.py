@@ -433,6 +433,168 @@ class ProjectCheckTests(unittest.TestCase):
                     self.assertEqual(result["status"], status)
                     self.assertIn(output, result["diagnostics"])
 
+    def test_expected_warnings_match_exact_lines_with_bounded_counts(self):
+        message = "evaluation warning: optional synthetic transport [v1].* is disabled"
+        expected = {
+            "message": message,
+            "reason": "The isolated fixture deliberately disables this transport.",
+            "max_count": 2,
+        }
+        cases = [
+            (message, 0, "passed", 1),
+            (message + "\n" + message, 0, "passed", 2),
+            ("clean output", 0, "passed", 0),
+            ("\n".join([message] * 3), 0, "failed", 3),
+            (message + "\nwarning: unused variable", 0, "failed", 1),
+            (message + "\n1 warning generated.", 0, "failed", 1),
+            (message + ": unexpected suffix", 0, "failed", 0),
+            ("prefix " + message, 0, "failed", 0),
+            ("\x1b[33m" + message + "\x1b[0m", 0, "failed", 0),
+            (message, 7, "failed", 1),
+            (message + "\nrequired command not found", 1, "blocked", 1),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for output, code, status, count in cases:
+                with self.subTest(output=output, code=code):
+                    check = self.check(
+                        "transport",
+                        f"print({output!r}); exit({code})",
+                        expected_warnings=[expected],
+                    )
+                    result = checks.run_check(root, check, root)
+                    self.assertEqual(result["status"], status)
+                    self.assertEqual(result["returncode"], code)
+                    self.assertIn(output, result["diagnostics"])
+                    self.assertIn(expected["reason"], result["diagnostics"])
+                    self.assertEqual(
+                        result["expected_warnings"], [{**expected, "count": count}]
+                    )
+                    if count > expected["max_count"]:
+                        self.assertIn(
+                            "occurrence limit exceeded", result["diagnostics"]
+                        )
+            undeclared = self.check("transport", f"print({message!r})")
+            self.assertEqual(
+                checks.run_check(root, undeclared, root)["status"], "failed"
+            )
+            timed_out = self.check(
+                "transport",
+                f"print({message!r}, flush=True); import time; time.sleep(30)",
+                expected_warnings=[expected],
+                timeout_seconds=0.5,
+            )
+            result = checks.run_check(root, timed_out, root)
+            self.assertEqual(result["status"], "blocked")
+            self.assertIsNone(result["returncode"])
+            self.assertEqual(result["expected_warnings"], [{**expected, "count": 1}])
+
+    def test_expected_warnings_contract_requires_exact_text_reason_and_limit(self):
+        expected = {
+            "message": "warning: optional synthetic transport is disabled",
+            "reason": "The fixture disables it deliberately.",
+            "max_count": 2,
+        }
+        invalid = [
+            None,
+            "warning: guessed",
+            [None],
+            [expected, expected],
+            [
+                {**expected, "message": f"warning: synthetic {index}"}
+                for index in range(33)
+            ],
+            [{**expected, "unknown": True}],
+            [{key: value for key, value in expected.items() if key != "reason"}],
+            [{key: value for key, value in expected.items() if key != "max_count"}],
+            [{**expected, "reason": " "}],
+            [{**expected, "reason": "first\nsecond"}],
+            [{**expected, "reason": "x" * 4097}],
+            [{**expected, "message": "not a diagnostic"}],
+            [{**expected, "message": "warning: first\nwarning: second"}],
+            [{**expected, "message": "warning: first\rsecond"}],
+            [{**expected, "message": "warning: first\0second"}],
+            [{**expected, "message": "warning: " + "x" * 4096}],
+            *[[{**expected, "max_count": count}] for count in (True, 0, -1, 101, 1.5)],
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for declarations in ([expected], []):
+                check = self.check("transport", "", expected_warnings=declarations)
+                (root / checks.MANIFEST).write_text(
+                    json.dumps({"version": 1, "checks": [check]})
+                )
+                self.assertEqual(
+                    checks.load(root)["checks"][0]["expected_warnings"], declarations
+                )
+            for declarations in invalid:
+                with self.subTest(declarations=declarations):
+                    check = self.check("transport", "", expected_warnings=declarations)
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps({"version": 1, "checks": [check]})
+                    )
+                    with self.assertRaisesRegex(checks.CheckError, "expected_warnings"):
+                        checks.load(root)
+
+    def test_expected_warning_reports_remain_visible_in_text_json_and_plan(self):
+        message = "warning: optional synthetic transport is disabled"
+        expected = {
+            "message": message,
+            "reason": "The fixture disables it deliberately.",
+            "max_count": 1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            check = self.check(
+                "transport", f"print({message!r})", expected_warnings=[expected]
+            )
+            (root / checks.MANIFEST).write_text(
+                json.dumps({"version": 1, "checks": [check]})
+            )
+            document = checks.load(root)
+            for json_output in (False, True):
+                output = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output),
+                    patch.object(
+                        checks,
+                        "baseline",
+                        return_value={
+                            "name": "baseline",
+                            "status": "passed",
+                            "diagnostics": "",
+                        },
+                    ),
+                ):
+                    report = checks.run(root, document, "fast", json_output=json_output)
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(
+                    report["checks"][1]["expected_warnings"], [{**expected, "count": 1}]
+                )
+                self.assertIn(expected["reason"], output.getvalue())
+                if json_output:
+                    self.assertEqual(json.loads(output.getvalue()), report)
+                output = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output),
+                    patch.object(
+                        checks, "baseline_tooling", return_value=(root, sys.executable)
+                    ),
+                    patch.object(
+                        checks,
+                        "run_check",
+                        side_effect=AssertionError("plan executed a check"),
+                    ),
+                ):
+                    report = checks.plan(
+                        root, document, "fast", json_output=json_output
+                    )
+                self.assertEqual(report["status"], "ready")
+                self.assertEqual(report["checks"][1]["expected_warnings"], [expected])
+                self.assertIn(expected["reason"], output.getvalue())
+                if json_output:
+                    self.assertEqual(json.loads(output.getvalue()), report)
+
     def test_argv_and_relative_cwd_are_preserved(self):
         with tempfile.TemporaryDirectory(prefix="project with spaces ") as directory:
             root = Path(directory)
