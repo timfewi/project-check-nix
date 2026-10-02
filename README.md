@@ -37,6 +37,16 @@ check affected. The plan **never skips checks** and does not change `fast` or
 `full` execution. Git ignored paths are outside this change view; unavailable
 Git status blocks the changed plan. `--changed` requires `--plan`.
 
+The change view is limited to the selected project, including projects inside
+a larger Git checkout. Paths and both sides of renames are project-relative.
+Submodule commit changes are included; source changes inside submodules belong
+to their own project plans. Git output is bounded to 4 MiB per command and each
+command has a 15-second timeout. Inherited `GIT_*` overrides, global/system
+configuration, filesystem monitor hooks and external filters are disabled.
+The comparison uses Git's built-in normalization rather than external filter
+results such as LFS pointers. Repository Git metadata must remain trusted and
+stable during the query; the runner is not a filesystem sandbox.
+
 Watch reports a temporarily invalid manifest as blocked and keeps monitoring.
 It resumes the fast checks after the manifest becomes valid again.
 
@@ -233,3 +243,25 @@ packaged CLI rejected a 4 MiB overflow while completing the
 following check; its real Python baseline passed. Deadnix and statix passed.
 Rules, dependencies and manifest fields are unchanged. No full scanner replay,
 ARM64 execution or host installation ran.
+
+The 2026-10-02 changed-plan review reproduced inherited Git overrides, filesystem
+monitor and filter execution, and incorrectly scoped nested-project paths. Git
+metadata capture now reuses the runner's bounded process collection; change
+paths are relative to the selected project. External filters are overridden
+within explicit configuration bounds, and submodule contents use their own
+plans while changed submodule commits remain visible. The implementation is in
+`runtime/project_check.py`; `flake.nix` declares Git for the real fixture tests.
+
+The fast gate passed with 39 native contract tests, Ruff and both Linux output
+evaluations. Deadnix and statix passed. A real source CLI changed plan returned
+the current four changed paths without executing checks. Regression fixtures
+cover repository/configuration overrides, hooks, clean/process filters,
+newlines in project paths, renamed/untracked files, submodule ownership,
+unrepresentable/excessive filter configuration and output bounds. Upstream
+[git-status documentation](https://git-scm.com/docs/git-status) confirmed
+root-relative porcelain paths and the NUL-delimited rename contract; the
+implementation was verified with Git 2.55.
+
+Dependency pins and portable rules are unchanged. No scanner replay, ARM64
+execution, publication or host installation ran. Next: review malformed Git
+records and linked-worktree plans.

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -375,23 +376,19 @@ class ProjectCheckTests(unittest.TestCase):
             )
 
     def test_changed_paths_include_both_rename_sides_and_untracked(self):
-        status = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=b"R  new.py\0old.py\0?? added.py\0",
-            stderr=b"",
-        )
-        with patch.object(checks.subprocess, "run", return_value=status) as process:
+        with patch.object(
+            checks,
+            "git_output",
+            side_effect=[b"", b"\n", b"R  new.py\0old.py\0?? added.py\0"],
+        ) as process:
             paths = checks.changed_paths(Path("."))
         self.assertEqual(paths, ["added.py", "new.py", "old.py"])
-        self.assertIn("--no-optional-locks", process.call_args.args[0])
+        self.assertIn("--no-optional-locks", process.call_args.args[1])
         with (
             patch.object(
-                checks.subprocess,
-                "run",
-                return_value=subprocess.CompletedProcess(
-                    [], 1, b"", b"not a repository"
-                ),
+                checks,
+                "git_output",
+                side_effect=checks.CheckError("Git change list unavailable"),
             ),
             self.assertRaisesRegex(checks.CheckError, "Git change list"),
         ):
@@ -802,6 +799,201 @@ class ProjectCheckTests(unittest.TestCase):
                 checks.watch(root, json_output=True)
             self.assertEqual(run.call_count, 1)
             self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
+
+
+class ChangedPathsTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
+        self.environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.git("init", "-q", "--initial-branch=main")
+        self.source = self.root / "tracked.py"
+        self.source.write_text("before\n")
+        self.git("add", ".")
+        self.commit("fixture")
+        self.source.write_text("after\n")
+
+    def git(self, *arguments):
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            cwd=self.root,
+            env=self.environment,
+            capture_output=True,
+            check=True,
+        )
+
+    def commit(self, message, root=None):
+        self.git(
+            "-C",
+            str(root or self.root),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            message,
+        )
+
+    def test_ignores_inherited_repository_and_configuration_overrides(self):
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        self.git("-C", str(foreign), "init", "-q", "--initial-branch=main")
+        (foreign / "foreign.py").write_text("foreign\n")
+        config = self.root / "invalid-config"
+        config.write_text("not a git configuration\n")
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": str(foreign / ".git"),
+                "GIT_WORK_TREE": str(foreign),
+                "GIT_INDEX_FILE": str(foreign / ".git/index"),
+                "GIT_CONFIG_GLOBAL": str(config),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": "unavailable-program",
+            },
+        ):
+            paths = checks.changed_paths(self.root)
+        self.assertIn("tracked.py", paths)
+        self.assertNotIn("foreign.py", paths)
+
+    def test_paths_are_relative_to_selected_project_with_rename_sides(self):
+        project = self.root / "nested project\n"
+        project.mkdir()
+        source = project / "old.py"
+        source.write_text("before\n")
+        self.git("add", str(source))
+        self.commit("nested")
+        source.rename(project / "new.py")
+        self.git("add", str(project))
+        (project / "added file.py").write_text("untracked\n")
+        self.assertEqual(
+            checks.changed_paths(project), ["added file.py", "new.py", "old.py"]
+        )
+        self.assertEqual(
+            checks.relevance(
+                {"input_paths": ["new.py"]}, checks.changed_paths(project)
+            )["relevance"],
+            "affected",
+        )
+
+    def test_does_not_execute_repository_fsmonitor(self):
+        marker = self.root / "hook-executed"
+        hook = self.root / "fsmonitor.py"
+        hook.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('executed')\nprint('token\\0', end='')\n"
+        )
+        hook.chmod(0o700)
+        self.git("config", "core.fsmonitor", shlex.quote(str(hook)))
+        self.assertIn("tracked.py", checks.changed_paths(self.root))
+        self.assertFalse(marker.exists())
+
+    def test_does_not_execute_required_clean_or_process_filters(self):
+        self.source.write_text("after!\n")
+        os.utime(self.source, (1000, 1000))
+        for kind in ("clean", "process"):
+            with self.subTest(kind=kind):
+                marker = self.root / f"{kind}-executed"
+                program = self.root / f"{kind}.py"
+                program.write_text(
+                    "from pathlib import Path\n"
+                    f"Path({str(marker)!r}).write_text('executed')\nprint('filtered')\n"
+                )
+                (self.root / ".gitattributes").write_text(
+                    "tracked.py filter=fixture.driver\n"
+                )
+                self.git(
+                    "config",
+                    f"filter.fixture.driver.{kind}",
+                    shlex.join([sys.executable, str(program)]),
+                )
+                self.git("config", "filter.fixture.driver.required", "true")
+                self.assertIn("tracked.py", checks.changed_paths(self.root))
+                self.assertFalse(marker.exists())
+                self.git("config", "--remove-section", "filter.fixture.driver")
+
+    def test_submodule_content_is_owned_by_its_project_plan(self):
+        child = self.root / "child"
+        child.mkdir()
+        self.git("-C", str(child), "init", "-q", "--initial-branch=main")
+        source = child / "tracked.py"
+        source.write_text("before\n")
+        self.git("-C", str(child), "add", ".")
+        self.commit("child", child)
+        self.git("add", "child")
+        self.commit("submodule")
+        marker = child / "filter-executed"
+        program = child / "filter.py"
+        program.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('executed')\nprint('filtered')\n"
+        )
+        (child / ".gitattributes").write_text("tracked.py filter=fixture\n")
+        self.git(
+            "-C",
+            str(child),
+            "config",
+            "filter.fixture.clean",
+            shlex.join([sys.executable, str(program)]),
+        )
+        source.write_text("after!\n")
+        os.utime(source, (1000, 1000))
+        self.assertNotIn("child", checks.changed_paths(self.root))
+        self.assertFalse(marker.exists())
+        self.assertIn("tracked.py", checks.changed_paths(child))
+        self.assertFalse(marker.exists())
+        self.git("-C", str(child), "config", "--remove-section", "filter.fixture")
+        self.git("-C", str(child), "add", "tracked.py")
+        self.commit("update", child)
+        self.assertIn("child", checks.changed_paths(self.root))
+
+    def test_unrepresentable_and_excessive_filters_block_before_status(self):
+        for names in (
+            ("bad=driver",),
+            tuple(f"driver{index}" for index in range(65)),
+            ("x" * 32768,),
+        ):
+            with self.subTest(count=len(names)):
+                for name in names:
+                    self.git("config", f"filter.{name}.required", "true")
+                with self.assertRaisesRegex(checks.CheckError, "filter configuration"):
+                    checks.changed_paths(self.root)
+                for name in names:
+                    self.git("config", "--remove-section", f"filter.{name}")
+
+    def test_git_capture_bounds_output_and_reports_unavailable_commands(self):
+        with patch.object(checks, "MAX_OUTPUT_BYTES", 256):
+            exact = checks.git_output(
+                self.root,
+                [sys.executable, "-c", "import os; os.write(1, b'x'*256)"],
+                self.environment,
+            )
+            self.assertEqual(exact, b"x" * 256)
+            with self.assertRaisesRegex(checks.CheckError, "too large"):
+                checks.git_output(
+                    self.root,
+                    [sys.executable, "-c", "import os; os.write(1, b'x'*257)"],
+                    self.environment,
+                )
+        with self.assertRaisesRegex(checks.CheckError, "cannot inspect Git"):
+            checks.git_output(
+                self.root, [str(self.root / "unavailable")], self.environment
+            )
 
 
 if __name__ == "__main__":

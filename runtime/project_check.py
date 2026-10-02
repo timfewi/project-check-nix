@@ -535,47 +535,120 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
     return report
 
 
-def changed_paths(root: Path) -> list[str]:
-    """Read stable NUL-delimited Git status, including both sides of renames."""
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-            ],
-            cwd=root,
-            capture_output=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise CheckError("cannot inspect Git changes") from error
-    if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
-        raise CheckError("Git change list unavailable or too large")
-    if result.stdout and not result.stdout.endswith(b"\0"):
-        raise CheckError("incomplete Git status output")
-    records = result.stdout.split(b"\0")
-    paths = set()
-    index = 0
-    while index < len(records) - 1:
-        record = records[index]
-        if len(record) < 4 or record[2:3] != b" ":
-            raise CheckError("invalid Git status record")
-        names = [record[3:]]
-        if b"R" in record[:2] or b"C" in record[:2]:
-            index += 1
-            if index >= len(records) - 1:
-                raise CheckError("incomplete Git rename record")
-            names.append(records[index])
+def git_output(
+    root: Path,
+    command: list[str],
+    env: dict[str, str],
+    allowed_codes: tuple[int, ...] = (0,),
+) -> bytes:
+    """Capture Git metadata without exposing diagnostics or unbounded output."""
+    with tempfile.TemporaryFile() as output:
         try:
-            paths.update(name.decode("utf-8") for name in names)
-        except UnicodeDecodeError as error:
-            raise CheckError("non-UTF-8 Git path is unsupported") from error
-        index += 1
+            process = subprocess.Popen(
+                command,
+                cwd=root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            failure = collect_output(process, output, 15)
+        except OSError as error:
+            raise CheckError("cannot inspect Git changes") from error
+        if failure or process.returncode not in allowed_codes:
+            raise CheckError("Git change list unavailable or too large")
+        output.seek(0)
+        return output.read()
+
+
+def changed_paths(root: Path) -> list[str]:
+    """Read project-relative Git changes without running repository hooks or filters."""
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env.update(
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_OPTIONAL_LOCKS="0",
+        GIT_NO_REPLACE_OBJECTS="1",
+        GIT_TERMINAL_PROMPT="0",
+    )
+    command = [
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ]
+    names = git_output(
+        root,
+        command
+        + [
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|smudge|process|required)$",
+        ],
+        env,
+        (0, 1),
+    )
+    drivers = {name.rsplit(b".", 1)[0] for name in names.split(b"\0") if name}
+    if (
+        len(names) > 32768
+        or len(drivers) > 64
+        or any(b"=" in driver for driver in drivers)
+    ):
+        raise CheckError(
+            "Git filter configuration cannot be overridden within safe bounds"
+        )
+    for driver in sorted(drivers):
+        for setting, value in (
+            ("clean", ""),
+            ("smudge", ""),
+            ("process", ""),
+            ("required", "false"),
+        ):
+            command.extend(["-c", f"{os.fsdecode(driver)}.{setting}={value}"])
+    prefix = git_output(root, command + ["rev-parse", "--show-prefix"], env)
+    if not prefix.endswith(b"\n"):
+        raise CheckError("incomplete Git project prefix")
+    raw = git_output(
+        root,
+        command
+        + [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=dirty",
+            "--",
+            ".",
+        ],
+        env,
+    )
+    if raw and not raw.endswith(b"\0"):
+        raise CheckError("incomplete Git status output")
+    paths = set()
+    records = iter(raw.split(b"\0")[:-1])
+    try:
+        project_prefix = prefix[:-1].decode("utf-8")
+        for record in records:
+            if len(record) < 4 or record[2:3] != b" ":
+                raise CheckError("invalid Git status record")
+            names = [record[3:]]
+            if b"R" in record[:2] or b"C" in record[:2]:
+                names.append(next(records))
+            for name in names:
+                path = name.decode("utf-8")
+                if path.startswith(project_prefix):
+                    paths.add(path[len(project_prefix) :])
+    except StopIteration as error:
+        raise CheckError("incomplete Git rename record") from error
+    except UnicodeDecodeError as error:
+        raise CheckError("non-UTF-8 Git path is unsupported") from error
     return sorted(paths)
 
 
@@ -662,7 +735,10 @@ def plan(
     }
     if changed:
         report["change_scope"] = {
-            "corpus": "Git tracked and untracked paths; ignored paths excluded",
+            "corpus": (
+                "Git tracked and untracked paths beneath selected project; "
+                "ignored paths and submodule contents excluded"
+            ),
             "total": len(paths),
             "examples": paths[:20],
             "advisory_only": True,

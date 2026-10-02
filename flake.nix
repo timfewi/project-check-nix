@@ -41,6 +41,7 @@
             pkgs.runCommand "project-check-python-tests"
               {
                 nativeBuildInputs = [
+                  pkgs.git
                   pkgs.python3
                   pkgs.ruff
                 ];
