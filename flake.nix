@@ -23,6 +23,7 @@
         {
           default = projectCheck;
           project-check = projectCheck;
+          project-docs = pkgs.callPackage ./packages/project-docs.nix { };
           quality-rules = qualityRules;
         }
       );

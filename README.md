@@ -54,7 +54,54 @@ Every run also reports a scanner coverage summary. Zero findings alone are not
 proof of coverage: a run with no supported source files or with parser errors
 never reports `passed`.
 
-## Manifest contract
+## Dependency documentation
+
+`project-docs` is bundled with the runner. Repositories opt in with
+`.dependency-docs.json`; explicit `project-check fast`, `full` and `watch` runs
+then refresh only the declared Markdown targets before project checks. Baseline,
+discovery and `--plan` never generate documentation. Nothing is staged or
+published. Existing repositories without the manifest keep their checks.
+
+Version-sensitive documentation belongs in templates, with versions read from
+the lockfile, dependency manifests, Python literal defaults or a declared Nix
+attribute. This prevents a changed version leaving a stale handwritten copy.
+The same workflow works in every agent harness; it needs no conversation hook.
+
+```json
+{
+  "version": 1,
+  "sources": {
+    "package": {"kind": "json", "path": "package.json"},
+    "lock": {"kind": "json", "path": "flake.lock"},
+    "versions": {"kind": "nix", "attribute": "lib.dependencyVersions"}
+  },
+  "templates": [
+    {"source": "README.md.in", "target": "README.md"}
+  ]
+}
+```
+
+Templates use `{{package.dependencies.example}}`, `{{versions | table}}` or
+`{{package | json}}`. TOML sources use `kind: "toml"`; Python defaults use
+`kind: "python-literal"` plus a top-level `symbol`. Python is parsed with AST
+literal evaluation and is never imported. Nix uses offline, no-lockfile-write
+evaluation of the explicit attribute; it does not build or update dependencies.
+That evaluation still trusts the selected repository's Nix source.
+
+`project-docs` alone checks for drift without writing and exits 1 for stale
+documentation. `project-docs --write` refreshes it. All templates are rendered
+before the first write. Source/target paths must stay in the repository, cannot
+use symlinks, and outputs must be Markdown in existing directories. Unknown
+placeholders, overlapping inputs/outputs and oversized sources fail. Missing
+tools or offline Nix inputs report an environment blocker.
+
+Older pinned runners can declare an explicit `project-docs --write` fast/full
+check, or bootstrap a reviewed copy of `runtime/project_docs.py` until the new
+runner is released and pinned. A source change here does not update installed
+host tools or existing repositories' pins; publication and host activation are
+separate operations.
+
+## Check manifest contract
 
 `.project-checks.json` is version 1:
 

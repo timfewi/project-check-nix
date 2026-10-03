@@ -23,6 +23,7 @@ MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 QUALITY_RULES = "@qualityRules@"
 SEMGREP = "@semgrep@"
 CA_CERT_FILE = "@cacert@/etc/ssl/certs/ca-bundle.crt"
+PROJECT_DOCS = "@projectDocs@"
 TOOLCHAIN_HINT = (
     "Enter the project toolchain with `nix develop path:.` (or reload direnv), "
     "then retry. If the tool is still unavailable, declare it in flake.nix "
@@ -488,6 +489,33 @@ def baseline(root: Path, scratch: Path) -> dict:
     return result
 
 
+def documentation_checks(root: Path, document: dict, profile: str) -> list[dict]:
+    """Explicit checks synchronize opted-in docs; baseline and discovery stay read-only."""
+    checks = document["checks"]
+    if profile not in ("fast", "full") or not (root / ".dependency-docs.json").exists():
+        return checks
+    command = (
+        [sys.executable, str(Path(__file__).with_name("project_docs.py"))]
+        if PROJECT_DOCS.startswith("@")
+        else [PROJECT_DOCS]
+    )
+    name = "dependency-docs"
+    while name in {check["name"] for check in checks}:
+        name += "-auto"
+    return [
+        {
+            "name": name,
+            "argv": [*command, "--write"],
+            "cwd": ".",
+            "requires": [],
+            "timeout_seconds": 120,
+            "profiles": ["fast", "full"],
+            "input_paths": [],
+        },
+        *checks,
+    ]
+
+
 def run(root: Path, document: dict, profile: str, *, json_output: bool = False) -> dict:
     results = []
     # The runner owns scratch, outside sources; the isolated worker supplies an
@@ -498,7 +526,7 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
         results.append(result)
         if not json_output:
             print(result["diagnostics"])
-        for check in document["checks"]:
+        for check in documentation_checks(root, document, profile):
             if profile not in check["profiles"]:
                 result = {
                     "name": check["name"],
@@ -705,7 +733,7 @@ def plan(
         checks[0].update(
             {"relevance": "required", "matched_total": 0, "matched_examples": []}
         )
-    for check in document["checks"]:
+    for check in documentation_checks(root, document, profile):
         if profile not in check["profiles"]:
             continue
         cwd = (root / check["cwd"]).resolve()
