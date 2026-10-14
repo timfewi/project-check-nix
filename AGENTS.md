@@ -16,8 +16,11 @@
   `nix flake check --no-build`, Ruff lint/format and the Python unit tests. The
   `quality-rules` Semgrep check is opt-in: run it when the portable rules or
   fixtures change.
-- Do not stage, commit, push, activate, deploy, install, or rewrite history
-  without explicit authorization.
+- Task-scoped staging is authorized. After review and required checks, commit
+  the task changes and push to the current branch's existing upstream. Preserve
+  unrelated work.
+- Deployment, activation, installation, releases, visibility changes and history
+  rewrites require separate authorization.
 - Keep operator identities, personal checkout paths, device labels and account
   choices in the consuming host. Functional upstream repository coordinates are
   not credentials.
