@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "warnings": "fail",
   "checks": [{
     "name": "project-check-fast",
     "argv": ["bash", "scripts/check", "fast"],

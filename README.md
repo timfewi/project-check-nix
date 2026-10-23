@@ -13,7 +13,7 @@ their `.project-checks.json` at this installed runner instead of copying it.
 
 ## What it runs
 
-`project-check <profile>` supports four profiles:
+`project-check <profile>` supports four profiles and one maintenance command:
 
 | Profile | Behaviour |
 | --- | --- |
@@ -21,6 +21,7 @@ their `.project-checks.json` at this installed runner instead of copying it.
 | `fast` | Baseline plus every manifest check that declares `fast`. |
 | `full` | Baseline plus every manifest check that declares `full`. |
 | `watch` | Re-runs `fast` whenever tracked/untracked source changes (batched). |
+| `migrate` | Previews (`--write` applies) a manifest schema upgrade; runs no checks. |
 
 Use `project-check fast --plan` (or `full --plan`) to list the selected checks
 and inspect local executable, rules and working-directory availability before a
@@ -103,11 +104,12 @@ separate operations.
 
 ## Check manifest contract
 
-`.project-checks.json` is version 1:
+`.project-checks.json` declares its schema `version`; this runner accepts 1
+and 2:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "checks": [
     {
       "name": "format",
@@ -122,28 +124,72 @@ separate operations.
 }
 ```
 
-- `name` is a unique lowercase identifier.
-- `argv` is a nonempty string array; the first entry is the program. Nothing is
-  passed through a shell.
-- `requires` lists programs that must be on `PATH`; explicit relative paths
-  resolve from the check's `cwd`. A missing one marks the check `blocked`, not failed.
-- `cwd` (optional) is a project-relative directory; it may not escape the project.
-- `timeout_seconds` bounds each check and kills its whole process group.
-- `profiles` is a nonempty subset of `fast` and `full`.
-- `input_paths` (optional) lists exact project-relative files or directories
-  ending in `/` for the advisory changed plan. Omit it when scope is unknown;
-  wildcards and parent traversal are rejected.
-- `expected_warnings` (optional) declares exact warning lines with a reason and
-  an occurrence limit, as described below. Older runners reject this field;
-  update the selected runner before adopting it.
-- `watch_ignore` lists glob patterns excluded from change detection. The check
-  manifest is always watched so an invalid manifest can be repaired.
+| Field | Since | Meaning |
+| --- | --- | --- |
+| `name` | 1 | Unique lowercase identifier. |
+| `argv` | 1 | Nonempty string array; the first entry is the program. Nothing is passed through a shell. |
+| `requires` | 1 | Programs that must be on `PATH`; explicit relative paths resolve from the check's `cwd`. A missing one marks the check `blocked`, not failed. |
+| `cwd` | 1 | Optional project-relative directory; it may not escape the project. |
+| `timeout_seconds` | 1 | Bounds each check and kills its whole process group. |
+| `profiles` | 1 | Nonempty subset of `fast` and `full`. |
+| `watch_ignore` | 1 | Top-level glob patterns excluded from change detection. The manifest itself is always watched so an invalid manifest can be repaired. |
+| `input_paths` | 2 | Optional exact project-relative files, or directories ending in `/`, for the advisory changed plan. Omit it when scope is unknown; wildcards and parent traversal are rejected. |
+| `expected_warnings` | 2 | Optional exact warning lines with a reason and an occurrence limit, described below. |
+| `warnings` | 2 | Optional `fail` or `report`, at top level (default for all checks) or per check (override), described below. |
 
-Warnings fail an otherwise successful check. The exact Nix `warning: Git tree
-'…' is dirty` notice is retained as diagnostic context but is not a quality
-failure: checking uncommitted edits is the normal workflow. Undeclared
-compiler/linter warnings and warning counts still fail the check; exceptions
-cannot overrule a nonzero exit status.
+### Schema evolution
+
+Every field records the version that introduced it, and a new field always
+raises the schema version. Errors name the side that is outdated:
+
+- A manifest newer than the runner reports both versions and the runner's path:
+  update the pinned `project-check` instead of editing the manifest.
+- A field newer than the declared version names the field and the version it
+  needs: `project-check migrate --write` upgrades the manifest.
+- An unknown field is named, together with the runner's supported versions.
+
+`project-check migrate` changes a manifest only when its declared version
+cannot express its content. A manifest valid under its own version stays
+current, even when older than the runner: the runner keeps every earlier
+version's semantics, and older runners keep accepting it. Without `--write` an
+outdated manifest exits 1 and nothing is written. Migrations preserve behavior
+and the result is validated before an atomic replace. An upgrade that only
+adds top-level settings rewrites the version line and inserts the new lines
+beneath it with the same indentation, so formatter-owned layout stays intact;
+other upgrades are written with two-space indentation.
+
+Adding a field means: register it with the next version, raise
+`SCHEMA_VERSION`, add a `MIGRATIONS` step that keeps older manifests' behavior
+explicit, and release the runner before manifests adopt the field. Version 1 is
+the field set of runners released before `input_paths`; those runners report a
+version 2 manifest as `project checks require version 1`.
+
+### Warnings
+
+Complete Nix notices about the caller's environment are retained as diagnostic
+context but are never quality failures: the dirty Git tree notice, an ignored
+untrusted substituter, an ignored restricted client setting and a transient
+download retry (`…; retrying in N ms (attempt i/n)`).
+
+Other warning lines (`warning:`, `…Warning:`, `N warnings`) follow the check's
+`warnings` policy. The exit status always decides first; no policy or
+exception can overrule a nonzero exit.
+
+| Policy | Effect |
+| --- | --- |
+| `fail` | Undeclared warning lines and counts fail an otherwise successful check. |
+| `report` | Warning lines stay visible and are counted, but do not fail the check. It cannot be combined with `expected_warnings`. |
+
+The effective policy is the check's `warnings`, else `fail` for a check with
+`expected_warnings`, else the manifest's top-level `warnings`, else the
+version default: `fail` for version 1 and `report` for version 2.
+
+Keep `report` where the tool owns its warning policy (`clippy -D warnings`,
+`ruff`, `-W error`, the runner's own `RUSTFLAGS=-D warnings`) or where a
+dependency's deprecation output is outside the project's control. Set
+`"warnings": "fail"` where warning text is the only signal. The version 1 to 2
+migration adds a top-level `"warnings": "fail"`, so migrated manifests keep
+their behavior until a check opts into `report`.
 
 Each check captures at most 4 MiB of combined stdout and stderr. Exceeding that
 limit stops the check's own process group and reports `failed`, retaining the
@@ -151,6 +197,16 @@ bounded prefix with an explicit truncation diagnostic (`output_truncated` in
 JSON). Partial output cannot prove success or turn an overflow into an
 environment blocker. The remaining checks still run. The timeout also applies
 when a check closes its output or a descendant keeps its output pipe open.
+A timeout reports `failed` with `timed_out` in JSON: a slow check is a gate
+problem (raise `timeout_seconds` or move it to `full`), not a missing tool.
+
+Checks run with a per-run scratch `TMPDIR`. `CARGO_TARGET_DIR` and
+`RUFF_CACHE_DIR` live in a persistent per-project cache,
+`$XDG_CACHE_HOME/project-check/<name>-<hash>/` (default `~/.cache`), so Rust
+checks reuse earlier builds without sharing the project's own `target/`, whose
+different `RUSTFLAGS` would force rebuilds. Deleting the cache is always safe.
+Without a writable user cache, such as inside a Nix build, the caches fall back
+to the per-run scratch directory.
 
 A check may declare a known, intentional diagnostic:
 
@@ -179,9 +235,11 @@ project commands.
 
 Missing requirements, process-start errors and shell exit codes 126/127 report
 `blocked`, with instructions to enter `nix develop path:.` or repair the declared
-`devShells` tools. Nonzero command exits include their exit status even when the
-command printed nothing. Diagnostics from the runner do not echo argv arguments;
-the invoked tools remain responsible for their own output.
+`devShells` tools. A failed command whose output names a missing toolchain or
+download also reports `blocked`; the same text in a passing check does not.
+Nonzero command exits include their exit status even when the command printed
+nothing. Diagnostics from the runner do not echo argv arguments; the invoked
+tools remain responsible for their own output.
 
 The overall text/JSON status is `blocked` when selected checks have environment
 blockers but no failures. A real failure takes precedence over a blocker. Both

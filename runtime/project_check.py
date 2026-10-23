@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,23 @@ from collections import Counter
 from pathlib import Path
 
 MANIFEST = ".project-checks.json"
+# Every manifest field names the schema version that introduced it. A new
+# field always raises SCHEMA_VERSION, so an older runner reports an outdated
+# runner instead of an opaque field error, and `migrate` upgrades manifests.
+SCHEMA_VERSION = 2
+DOCUMENT_FIELDS = {"version": 1, "checks": 1, "watch_ignore": 1, "warnings": 2}
+CHECK_FIELDS = {
+    "name": 1,
+    "argv": 1,
+    "cwd": 1,
+    "requires": 1,
+    "timeout_seconds": 1,
+    "profiles": 1,
+    "input_paths": 2,
+    "expected_warnings": 2,
+    "warnings": 2,
+}
+WARNING_POLICIES = ("fail", "report")
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 QUALITY_RULES = "@qualityRules@"
 SEMGREP = "@semgrep@"
@@ -49,9 +67,16 @@ IGNORED = frozenset(
 WARNING = re.compile(
     r"(?im)\b(?:[A-Za-z]+Warning|warning)(?:\s*\[|:)|\b[1-9]\d* warnings?\b"
 )
-# Checking uncommitted edits is the normal agent workflow. Nix's dirty-tree
-# notice describes input identity, not a lint finding; retain it in diagnostics.
-NIX_DIRTY_NOTICE = re.compile(r"warning: Git tree '[^\r\n]+' is dirty")
+# Checking uncommitted edits as an untrusted user is the normal agent workflow.
+# These complete Nix notices describe input identity, caller trust or a
+# transient network retry, not a quality finding; retain them in diagnostics.
+NIX_ENVIRONMENT_NOTICE = re.compile(
+    r"warning: (?:Git tree '[^\r\n]+' is dirty"
+    r"|ignoring untrusted substituter '[^\r\n]+', you are not a trusted user\."
+    r"|ignoring the client-specified setting '[^\r\n]+', because it is a "
+    r"restricted setting and you are not a trusted user"
+    r"|[^\r\n]+; retrying in \d+ ms \(attempt \d+/\d+\))"
+)
 ENVIRONMENT_FAILURE = re.compile(
     r"no matching package named|failed to download|can't find crate for|"
     r"required command not found|TOOLCHAIN_(?:STALE|NOT_REGISTERED)|"
@@ -75,35 +100,67 @@ def strings(value: object, label: str) -> list[str]:
     return value
 
 
-def load(root: Path) -> dict:
+def runner_location() -> str:
+    return str(Path(__file__).resolve())
+
+
+def schema_fields(found: dict, known: dict, version: int, label: str) -> None:
+    """Name unknown or too-new fields so schema drift is actionable."""
+    for field in sorted(found):
+        introduced = known.get(field)
+        if introduced is None:
+            raise CheckError(
+                f"{label}: unknown field {field!r}; this runner supports "
+                f"manifest versions 1 to {SCHEMA_VERSION} ({runner_location()}). "
+                "A newer project-check may define it."
+            )
+        if introduced > version:
+            raise CheckError(
+                f"{label}: field {field!r} requires manifest version {introduced}, "
+                f"but {MANIFEST} declares version {version}. "
+                "Run `project-check migrate --write` to upgrade it."
+            )
+
+
+def read_manifest(root: Path) -> dict:
     try:
         document = json.loads((root / MANIFEST).read_text())
     except (OSError, ValueError) as error:
         raise CheckError(f"cannot read {MANIFEST}: {error}") from error
-    if (
-        not isinstance(document, dict)
-        or type(document.get("version")) is not int
-        or document["version"] != 1
-    ):
-        raise CheckError("project checks require version 1")
-    if set(document) - {"version", "checks", "watch_ignore"}:
-        raise CheckError("unknown project-checks field")
+    if not isinstance(document, dict) or type(document.get("version")) is not int:
+        raise CheckError(f"{MANIFEST} requires an integer version")
+    version = document["version"]
+    if version > SCHEMA_VERSION:
+        raise CheckError(
+            f"{MANIFEST} declares version {version}, but this project-check "
+            f"supports versions 1 to {SCHEMA_VERSION} ({runner_location()}). "
+            "Update the project-check runner; the manifest is newer."
+        )
+    if version < 1:
+        raise CheckError(f"{MANIFEST} version must be at least 1")
+    return document
+
+
+def load(root: Path) -> dict:
+    return validate(root, read_manifest(root))
+
+
+def validate(root: Path, document: dict) -> dict:
+    version = document["version"]
+    schema_fields(document, DOCUMENT_FIELDS, version, MANIFEST)
+    # Version 1 had no policy field and always failed on warnings.
+    default_policy = document.get("warnings", "fail" if version == 1 else "report")
+    if default_policy not in WARNING_POLICIES:
+        raise CheckError("warnings must be 'fail' or 'report'")
     checks = document.get("checks")
     if not isinstance(checks, list) or not checks:
         raise CheckError("checks must be a nonempty array")
     names = set()
-    for check in checks:
-        if not isinstance(check, dict) or set(check) - {
-            "name",
-            "argv",
-            "cwd",
-            "requires",
-            "timeout_seconds",
-            "profiles",
-            "input_paths",
-            "expected_warnings",
-        }:
-            raise CheckError("invalid check fields")
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            raise CheckError(f"checks[{index}] must be an object")
+        label = check.get("name") if isinstance(check.get("name"), str) else None
+        schema_fields(check, CHECK_FIELDS, version, label or f"checks[{index}]")
         name = check.get("name")
         if (
             not isinstance(name, str)
@@ -195,6 +252,14 @@ def load(root: Path) -> dict:
                 raise CheckError(
                     f"{name}.expected_warnings max_count must be an integer between 1 and 100"
                 )
+        # Declared exceptions only mean something when warnings fail.
+        policy = check.setdefault("warnings", "fail" if expected else default_policy)
+        if policy not in WARNING_POLICIES:
+            raise CheckError(f"{name}.warnings must be 'fail' or 'report'")
+        if policy == "report" and expected:
+            raise CheckError(
+                f"{name}: expected_warnings only apply when warnings fail the check"
+            )
     ignore = document.get("watch_ignore", [])
     if not isinstance(ignore, list) or not all(
         isinstance(item, str) for item in ignore
@@ -258,7 +323,9 @@ def collect_output(process: subprocess.Popen, output, timeout: float) -> str | N
             stop(process)
 
 
-def run_check(root: Path, check: dict, scratch: Path) -> dict:
+def run_check(
+    root: Path, check: dict, scratch: Path, cache: Path | None = None
+) -> dict:
     result = {
         "name": check["name"],
         "status": "blocked",
@@ -277,13 +344,14 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
             "missing required programs: " + ", ".join(missing) + "\n" + TOOLCHAIN_HINT
         )
         return result
+    cache = cache or scratch
     environment = dict(os.environ)
     environment.update(
         {
             "TMPDIR": str(scratch),
-            "CARGO_TARGET_DIR": str(scratch / "cargo-target"),
+            "CARGO_TARGET_DIR": str(cache / "cargo-target"),
             "PYTHONDONTWRITEBYTECODE": "1",
-            "RUFF_CACHE_DIR": str(scratch / "ruff"),
+            "RUFF_CACHE_DIR": str(cache / "ruff"),
             "RUSTFLAGS": environment.get("RUSTFLAGS", "") + " -D warnings",
         }
     )
@@ -311,8 +379,12 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
             return result
         capture_error = collect_output(process, output, check["timeout_seconds"])
         if capture_error == "timeout":
+            # A slow check is a failed check, not a missing toolchain.
+            result["status"] = "failed"
+            result["timed_out"] = True
             result["diagnostics"] = (
-                f"timeout after {check['timeout_seconds']} seconds\n"
+                f"timeout after {check['timeout_seconds']} seconds; raise "
+                "timeout_seconds or move the check to the full profile\n"
             )
         elif capture_error:
             result["returncode"] = process.returncode
@@ -331,7 +403,7 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
     warnings = Counter(
         line
         for line in diagnostics.splitlines()
-        if WARNING.search(line) and not NIX_DIRTY_NOTICE.fullmatch(line)
+        if WARNING.search(line) and not NIX_ENVIRONMENT_NOTICE.fullmatch(line)
     )
     allowed = {}
     if check.get("expected_warnings"):
@@ -348,8 +420,8 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
                 result["diagnostics"] += (
                     "Expected diagnostic occurrence limit exceeded.\n"
                 )
-    if result.get("output_truncated"):
-        # Incomplete output cannot downgrade a real overflow into an
+    if result.get("output_truncated") or result.get("timed_out"):
+        # Incomplete output cannot downgrade a real overflow or timeout into an
         # environment blocker, even if its prefix contains that diagnostic.
         result["status"] = "failed"
     elif result["returncode"] in (126, 127):
@@ -357,13 +429,23 @@ def run_check(root: Path, check: dict, scratch: Path) -> dict:
         result["diagnostics"] += (
             f"\nCommand unavailable (exit {result['returncode']}).\n{TOOLCHAIN_HINT}\n"
         )
-    elif ENVIRONMENT_FAILURE.search(diagnostics):
+    elif result["status"] == "failed" and ENVIRONMENT_FAILURE.search(diagnostics):
         result["status"] = "blocked"
+    elif result["status"] == "passed" and check.get("warnings", "fail") == "report":
+        if warnings:
+            result["diagnostics"] += (
+                f"\n{sum(warnings.values())} warning lines reported; this check "
+                "declares warnings: report.\n"
+            )
     elif result["status"] == "passed" and any(
         count > allowed.get(line, 0) for line, count in warnings.items()
     ):
         result["status"] = "failed"
-        result["diagnostics"] += "\nWarnings make this required check unsuccessful.\n"
+        result["diagnostics"] += (
+            "\nWarnings make this required check unsuccessful. Fix them, declare "
+            'an exact expected_warnings entry, or set "warnings": "report" when '
+            "the tool enforces its own warning policy.\n"
+        )
     if result["status"] == "failed" and result["returncode"]:
         result["diagnostics"] += (
             f"\nCommand exited with status {result['returncode']}.\n"
@@ -484,9 +566,31 @@ def baseline(root: Path, scratch: Path) -> dict:
         ValueError,
         TypeError,
     ):
-        result["status"] = "blocked"
+        if not result.get("timed_out"):
+            result["status"] = "blocked"
         result["diagnostics"] += "\nScanner did not produce a valid coverage report.\n"
     return result
+
+
+def compiler_cache(root: Path) -> Path | None:
+    """Keep compiler caches warm across runs, apart from the project's own target/.
+
+    Checks get distinct RUSTFLAGS, so sharing target/ would rebuild it on every
+    switch. Without a writable user cache (e.g. a Nix build sandbox) the caller
+    falls back to per-run scratch.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or (
+        os.environ.get("HOME") and str(Path(os.environ["HOME"]) / ".cache")
+    )
+    if not base or not Path(base).is_absolute():
+        return None
+    key = hashlib.sha256(str(root).encode()).hexdigest()[:16]
+    cache = Path(base) / "project-check" / f"{root.name}-{key}"
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return cache if os.access(cache, os.W_OK | os.X_OK) else None
 
 
 def documentation_checks(root: Path, document: dict, profile: str) -> list[dict]:
@@ -522,6 +626,7 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
     # executable TMPDIR for native checks on systems with a noexec /tmp.
     with tempfile.TemporaryDirectory(prefix="project-check-") as temporary:
         scratch = Path(temporary)
+        cache = compiler_cache(root) or scratch
         result = baseline(root, scratch)
         results.append(result)
         if not json_output:
@@ -536,7 +641,7 @@ def run(root: Path, document: dict, profile: str, *, json_output: bool = False) 
             else:
                 if not json_output:
                     print(f"==> {check['name']}", flush=True)
-                result = run_check(root, check, scratch)
+                result = run_check(root, check, scratch, cache)
             results.append(result)
             if not json_output and result["diagnostics"]:
                 print(
@@ -761,6 +866,9 @@ def plan(
         else "ready",
         "checks": checks,
     }
+    if "version" in document:
+        report["manifest_version"] = document["version"]
+        report["schema_version"] = SCHEMA_VERSION
     if changed:
         report["change_scope"] = {
             "corpus": (
@@ -790,6 +898,91 @@ def plan(
                 )
         print(f"project-check plan {profile}: {report['status']}", flush=True)
     return report
+
+
+def upgrade_warning_policy(document: dict) -> dict:
+    """Version 1 failed on any warning; keep that explicit in version 2."""
+    document.setdefault("warnings", "fail")
+    return document
+
+
+# MIGRATIONS[n] upgrades a version-n document to version n + 1 without
+# changing its behavior. A field that is renamed, reshaped or changes its
+# default in a new version adds its transformation here.
+MIGRATIONS = {1: upgrade_warning_policy}
+
+
+def preserve_layout(text: str, document: dict, upgraded: dict) -> str | None:
+    """Rewrite only the version line when an upgrade adds top-level settings.
+
+    Formatters own manifest layout; a full reserialization would fight them.
+    """
+    if any(
+        upgraded.get(key) != value
+        for key, value in document.items()
+        if key != "version"
+    ):
+        return None
+    match = re.search(r'^([ \t]*)"version"\s*:\s*\d+', text, re.MULTILINE)
+    if not match:
+        return None
+    indent = match.group(1)
+    lines = [f'{indent}"version": {upgraded["version"]}'] + [
+        f"{indent}{json.dumps(key)}: {json.dumps(value)}"
+        for key, value in upgraded.items()
+        if key not in document
+    ]
+    rewritten = text[: match.start()] + ",\n".join(lines) + text[match.end() :]
+    try:
+        return rewritten if json.loads(rewritten) == upgraded else None
+    except ValueError:
+        return None
+
+
+def migrate(root: Path, *, write: bool, json_output: bool) -> int:
+    """Upgrade a manifest that its declared version cannot express.
+
+    A manifest valid under its own version stays current, so older runners
+    keep accepting it; the runner supports every earlier version.
+    """
+    path = root / MANIFEST
+    document = read_manifest(root)
+    original = document["version"]
+    # Validation fills defaults and migrations may mutate; work on copies.
+    upgraded = json.loads(json.dumps(document))
+    for version in range(original, SCHEMA_VERSION):
+        upgraded = MIGRATIONS[version](upgraded)
+        upgraded["version"] = version + 1
+    try:
+        validate(root, json.loads(json.dumps(document)))
+    except CheckError:
+        validate(root, json.loads(json.dumps(upgraded)))
+        status = "migrated" if write else "outdated"
+    else:
+        status = "current"
+    if status == "migrated":
+        text = path.read_text()
+        rewritten = preserve_layout(text, document, upgraded)
+        temporary = path.with_name(f".{MANIFEST}.migrate")
+        temporary.write_text(rewritten or json.dumps(upgraded, indent=2) + "\n")
+        os.replace(temporary, path)
+    report = {
+        "version": 1,
+        "mode": "migrate",
+        "status": status,
+        "from_version": original,
+        "to_version": original if status == "current" else SCHEMA_VERSION,
+    }
+    if json_output:
+        print(json.dumps(report), flush=True)
+    elif status == "outdated":
+        print(
+            f"{MANIFEST} version {original} cannot express its content; "
+            f"`project-check migrate --write` upgrades it to {SCHEMA_VERSION}."
+        )
+    else:
+        print(f"{MANIFEST}: {status} (version {report['to_version']})")
+    return 1 if status == "outdated" else 0
 
 
 def snapshot(root: Path, patterns: list[str]) -> dict:
@@ -873,7 +1066,9 @@ def watch(root: Path, *, json_output: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=("baseline", "fast", "full", "watch"))
+    parser.add_argument(
+        "profile", choices=("baseline", "fast", "full", "watch", "migrate")
+    )
     parser.add_argument(
         "--plan",
         action="store_true",
@@ -885,17 +1080,26 @@ def main(argv: list[str] | None = None) -> int:
         help="annotate a plan with Git change relevance",
     )
     parser.add_argument(
+        "--write",
+        action="store_true",
+        help="with migrate: rewrite the manifest instead of previewing",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="emit JSON (JSON lines in watch mode)"
     )
     arguments = parser.parse_args(argv)
-    if arguments.plan and arguments.profile == "watch":
-        parser.error("--plan does not support watch")
+    if arguments.plan and arguments.profile in ("watch", "migrate"):
+        parser.error(f"--plan does not support {arguments.profile}")
     if arguments.changed and not arguments.plan:
         parser.error("--changed requires --plan")
+    if arguments.write and arguments.profile != "migrate":
+        parser.error("--write requires migrate")
     root = Path.cwd().resolve()
     try:
         if arguments.profile == "watch":
             return watch(root, json_output=arguments.json)
+        if arguments.profile == "migrate":
+            return migrate(root, write=arguments.write, json_output=arguments.json)
         document = {"checks": []} if arguments.profile == "baseline" else load(root)
         if arguments.plan:
             report = plan(

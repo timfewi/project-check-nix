@@ -12,6 +12,19 @@ from unittest.mock import patch
 
 from runtime import project_check as checks
 
+# Runs over throwaway projects must never populate the user's compiler cache.
+_CACHE_HOME = tempfile.TemporaryDirectory()
+_CACHE_ENVIRONMENT = patch.dict(os.environ, {"XDG_CACHE_HOME": _CACHE_HOME.name})
+
+
+def setUpModule():
+    _CACHE_ENVIRONMENT.start()
+
+
+def tearDownModule():
+    _CACHE_ENVIRONMENT.stop()
+    _CACHE_HOME.cleanup()
+
 
 class ProjectCheckTests(unittest.TestCase):
     def test_manifest_requires_integer_version(self):
@@ -24,7 +37,7 @@ class ProjectCheckTests(unittest.TestCase):
                             {"version": version, "checks": [self.check("ok", "")]}
                         )
                     )
-                    with self.assertRaisesRegex(checks.CheckError, "version 1"):
+                    with self.assertRaisesRegex(checks.CheckError, "integer version"):
                         checks.load(root)
 
     def test_omitted_cwd_defaults_to_project_root(self):
@@ -114,11 +127,12 @@ class ProjectCheckTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue()), report)
             self.assertEqual(
                 [item["status"] for item in report["checks"][1:]],
-                ["failed", "failed", "blocked", "blocked", "passed", "not applicable"],
+                ["failed", "failed", "blocked", "failed", "passed", "not applicable"],
             )
             self.assertEqual(report["status"], "failed")
             self.assertEqual(report["checks"][1]["returncode"], 3)
             self.assertIn("timeout", report["checks"][4]["diagnostics"])
+            self.assertTrue(report["checks"][4]["timed_out"])
 
     def test_excessive_output_fails_without_accepting_partial_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -166,7 +180,7 @@ class ProjectCheckTests(unittest.TestCase):
                 timeout_seconds=0.1,
             )
             result = checks.run_check(root, check, root)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "failed")
             self.assertIn("timeout", result["diagnostics"])
             self.assertLess(result["duration_seconds"], 2)
 
@@ -402,7 +416,7 @@ class ProjectCheckTests(unittest.TestCase):
                     (root / checks.MANIFEST).write_text(
                         json.dumps(
                             {
-                                "version": 1,
+                                "version": 2,
                                 "checks": [self.check("code", "", input_paths=[path])],
                             }
                         )
@@ -478,14 +492,34 @@ class ProjectCheckTests(unittest.TestCase):
                 else:
                     self.assertIn("project-check fast: blocked", output.getvalue())
 
-    def test_nix_dirty_tree_notice_does_not_hide_real_warnings_or_failures(self):
-        notice = "warning: Git tree '/workspace/project' is dirty"
+    def test_nix_environment_notices_do_not_hide_real_warnings_or_failures(self):
+        notices = [
+            "warning: Git tree '/workspace/project' is dirty",
+            (
+                "warning: ignoring untrusted substituter 'https://cache.example', "
+                "you are not a trusted user."
+            ),
+            (
+                "warning: ignoring the client-specified setting 'max-jobs', because "
+                "it is a restricted setting and you are not a trusted user"
+            ),
+            (
+                "warning: unable to download 'https://cache.example/x.narinfo': "
+                "timeout; retrying in 263 ms (attempt 1/5)"
+            ),
+        ]
+        notice = "\n".join(notices)
         cases = [
             (notice, 0, "passed"),
             (notice + "\nwarning: unused variable", 0, "failed"),
             (notice + "\n1 warning generated.", 0, "failed"),
             (notice, 1, "failed"),
-            (notice + ": warning: unexpected suffix", 0, "failed"),
+            (notices[0] + ": warning: unexpected suffix", 0, "failed"),
+            (
+                "warning: Git tree '/workspace/project' has uncommitted changes",
+                0,
+                "failed",
+            ),
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -495,6 +529,213 @@ class ProjectCheckTests(unittest.TestCase):
                     result = checks.run_check(root, check, root)
                     self.assertEqual(result["status"], status)
                     self.assertIn(output, result["diagnostics"])
+
+    def test_report_policy_keeps_warnings_visible_without_overruling_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for code, status in ((0, "passed"), (1, "failed")):
+                with self.subTest(code=code):
+                    check = self.check(
+                        "lint",
+                        f"print('src/a.py:1: DeprecationWarning: old'); exit({code})",
+                        warnings="report",
+                    )
+                    result = checks.run_check(root, check, root)
+                    self.assertEqual(result["status"], status)
+                    self.assertIn("DeprecationWarning: old", result["diagnostics"])
+            strict = self.check("lint", "print('src/a.py:1: DeprecationWarning: old')")
+            result = checks.run_check(root, strict, root)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn('"warnings": "report"', result["diagnostics"])
+            for overrides in (
+                {"warnings": "ignore"},
+                {
+                    "warnings": "report",
+                    "expected_warnings": [
+                        {"message": "warning: x", "reason": "fixture", "max_count": 1}
+                    ],
+                },
+            ):
+                with self.subTest(overrides=overrides):
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps(
+                            {
+                                "version": 2,
+                                "checks": [self.check("one", "", **overrides)],
+                            }
+                        )
+                    )
+                    with self.assertRaisesRegex(checks.CheckError, "warnings"):
+                        checks.load(root)
+
+    def test_warning_policy_precedence_check_then_manifest_then_version(self):
+        expected = [{"message": "warning: known", "reason": "fixture", "max_count": 1}]
+        cases = [
+            ({"version": 1}, {}, "fail"),
+            ({"version": 2}, {}, "report"),
+            ({"version": 2, "warnings": "fail"}, {}, "fail"),
+            ({"version": 2, "warnings": "fail"}, {"warnings": "report"}, "report"),
+            ({"version": 2, "warnings": "report"}, {"warnings": "fail"}, "fail"),
+            ({"version": 2}, {"expected_warnings": expected}, "fail"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for document, overrides, policy in cases:
+                with self.subTest(document=document, overrides=overrides):
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps(
+                            {**document, "checks": [self.check("one", "", **overrides)]}
+                        )
+                    )
+                    self.assertEqual(checks.load(root)["checks"][0]["warnings"], policy)
+            (root / checks.MANIFEST).write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "warnings": "ignore",
+                        "checks": [self.check("one", "")],
+                    }
+                )
+            )
+            with self.assertRaisesRegex(checks.CheckError, "warnings"):
+                checks.load(root)
+
+    def test_environment_text_only_reclassifies_failed_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for code, status in ((0, "passed"), (1, "blocked")):
+                with self.subTest(code=code):
+                    check = self.check(
+                        "fetch",
+                        f"print('crate failed to download, retried'); exit({code})",
+                    )
+                    self.assertEqual(
+                        checks.run_check(root, check, root)["status"], status
+                    )
+
+    def test_schema_drift_names_the_field_and_the_outdated_side(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = [
+                (
+                    1,
+                    {"input_paths": ["src/"]},
+                    r"'input_paths' requires manifest version 2.*migrate --write",
+                ),
+                (
+                    2,
+                    {"surprise": True},
+                    r"unknown field 'surprise'.*newer project-check",
+                ),
+                (3, {}, r"declares version 3.*Update the project-check runner"),
+            ]
+            for version, overrides, message in cases:
+                with self.subTest(version=version, overrides=overrides):
+                    (root / checks.MANIFEST).write_text(
+                        json.dumps(
+                            {
+                                "version": version,
+                                "checks": [self.check("one", "", **overrides)],
+                            }
+                        )
+                    )
+                    with self.assertRaisesRegex(checks.CheckError, message):
+                        checks.load(root)
+
+    def test_migrate_upgrades_only_manifests_their_version_cannot_express(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / checks.MANIFEST
+            plain = json.dumps({"version": 1, "checks": [self.check("one", "")]})
+            manifest.write_text(plain)
+            with contextlib.chdir(root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checks.main(["migrate", "--write"]), 0)
+            self.assertEqual(manifest.read_text(), plain)
+            warning = "print('lib.py:1: DeprecationWarning: old')"
+            original = {
+                "version": 1,
+                "checks": [self.check("one", warning, input_paths=["src/"])],
+            }
+            del original["checks"][0]["cwd"]
+            # A formatter-owned layout: only the version line may change.
+            formatted = json.dumps(original, indent=4).replace(
+                '[\n                "src/"\n            ]', '["src/"]'
+            )
+            manifest.write_text(formatted)
+            output = io.StringIO()
+            with contextlib.chdir(root), contextlib.redirect_stdout(output):
+                self.assertEqual(checks.main(["migrate"]), 1)
+                self.assertEqual(manifest.read_text(), formatted)
+                self.assertEqual(checks.main(["migrate", "--write"]), 0)
+                self.assertEqual(checks.main(["migrate", "--json"]), 0)
+            self.assertIn("migrate --write", output.getvalue())
+            self.assertEqual(
+                manifest.read_text(),
+                formatted.replace(
+                    '    "version": 1', '    "version": 2,\n    "warnings": "fail"'
+                ),
+            )
+            self.assertEqual(
+                json.loads(output.getvalue().splitlines()[-1])["status"], "current"
+            )
+            # The migrated manifest keeps version 1 strictness; an undeclared
+            # policy in version 2 reports warnings without failing.
+            check = checks.load(root)["checks"][0]
+            self.assertEqual(checks.run_check(root, check, root)["status"], "failed")
+            migrated = json.loads(manifest.read_text())
+            del migrated["warnings"]
+            manifest.write_text(json.dumps(migrated))
+            check = checks.load(root)["checks"][0]
+            self.assertEqual(checks.run_check(root, check, root)["status"], "passed")
+            # Single-line JSON has no version line to edit; the upgrade is
+            # reserialized instead.
+            manifest.write_text(json.dumps(original, separators=(",", ":")))
+            with contextlib.chdir(root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checks.main(["migrate", "--write"]), 0)
+            self.assertEqual(
+                json.loads(manifest.read_text()),
+                {**original, "version": 2, "warnings": "fail"},
+            )
+            manifest.write_text(json.dumps({"version": 1, "checks": [{"name": "x"}]}))
+            with contextlib.chdir(root), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(checks.main(["migrate", "--write"]), 1)
+            self.assertEqual(json.loads(manifest.read_text())["version"], 1)
+
+    def test_compiler_caches_persist_between_runs_outside_the_project(self):
+        with (
+            tempfile.TemporaryDirectory() as project,
+            tempfile.TemporaryDirectory() as cache_home,
+        ):
+            root = Path(project)
+            record = (
+                "import os, pathlib; "
+                "target = pathlib.Path(os.environ['CARGO_TARGET_DIR']); "
+                "print('reused' if (target / 'marker').exists() else 'cold'); "
+                "target.mkdir(parents=True, exist_ok=True); "
+                "(target / 'marker').touch()"
+            )
+            document = {"checks": [self.check("build", record)]}
+            reports = []
+            with (
+                patch.dict(os.environ, {"XDG_CACHE_HOME": cache_home}),
+                patch.object(
+                    checks,
+                    "baseline",
+                    return_value={
+                        "name": "baseline",
+                        "status": "passed",
+                        "diagnostics": "",
+                    },
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                for _ in range(2):
+                    reports.append(checks.run(root, document, "fast", json_output=True))
+            self.assertIn("cold", reports[0]["checks"][1]["diagnostics"])
+            self.assertIn("reused", reports[1]["checks"][1]["diagnostics"])
+            self.assertEqual(list(root.iterdir()), [])
+            with patch.dict(os.environ, {"XDG_CACHE_HOME": "", "HOME": "/nonexistent"}):
+                self.assertIsNone(checks.compiler_cache(root))
 
     def test_expected_warnings_match_exact_lines_with_bounded_counts(self):
         message = "evaluation warning: optional synthetic transport [v1].* is disabled"
@@ -548,7 +789,7 @@ class ProjectCheckTests(unittest.TestCase):
                 timeout_seconds=0.5,
             )
             result = checks.run_check(root, timed_out, root)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "failed")
             self.assertIsNone(result["returncode"])
             self.assertEqual(result["expected_warnings"], [{**expected, "count": 1}])
 
@@ -585,7 +826,7 @@ class ProjectCheckTests(unittest.TestCase):
             for declarations in ([expected], []):
                 check = self.check("transport", "", expected_warnings=declarations)
                 (root / checks.MANIFEST).write_text(
-                    json.dumps({"version": 1, "checks": [check]})
+                    json.dumps({"version": 2, "checks": [check]})
                 )
                 self.assertEqual(
                     checks.load(root)["checks"][0]["expected_warnings"], declarations
@@ -594,7 +835,7 @@ class ProjectCheckTests(unittest.TestCase):
                 with self.subTest(declarations=declarations):
                     check = self.check("transport", "", expected_warnings=declarations)
                     (root / checks.MANIFEST).write_text(
-                        json.dumps({"version": 1, "checks": [check]})
+                        json.dumps({"version": 2, "checks": [check]})
                     )
                     with self.assertRaisesRegex(checks.CheckError, "expected_warnings"):
                         checks.load(root)
@@ -612,7 +853,7 @@ class ProjectCheckTests(unittest.TestCase):
                 "transport", f"print({message!r})", expected_warnings=[expected]
             )
             (root / checks.MANIFEST).write_text(
-                json.dumps({"version": 1, "checks": [check]})
+                json.dumps({"version": 2, "checks": [check]})
             )
             document = checks.load(root)
             for json_output in (False, True):
