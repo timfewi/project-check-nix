@@ -243,7 +243,8 @@ class ProjectCheckTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "blocked")
             self.assertIn("synthetic-missing-checker", result["diagnostics"])
-            self.assertIn("nix develop path:.", result["diagnostics"])
+            self.assertIn("devenv shell", result["diagnostics"])
+            self.assertIn("nix develop .", result["diagnostics"])
             self.assertIn("devShells", result["diagnostics"])
 
     def test_plan_checks_prerequisites_without_running_project_code(self):
@@ -446,7 +447,8 @@ class ProjectCheckTests(unittest.TestCase):
                     )
                     self.assertEqual(result["status"], "blocked")
                     self.assertIn(executable, result["diagnostics"])
-                    self.assertIn("nix develop path:.", result["diagnostics"])
+                    self.assertIn("devenv shell", result["diagnostics"])
+                    self.assertIn("nix develop .", result["diagnostics"])
                     self.assertNotIn("sensitive-argument", result["diagnostics"])
 
     def test_shell_exit_codes_and_silent_failures_have_actionable_diagnostics(self):
@@ -461,7 +463,8 @@ class ProjectCheckTests(unittest.TestCase):
                     self.assertEqual(result["returncode"], code)
                     self.assertIn(str(code), result["diagnostics"])
                     if status == "blocked":
-                        self.assertIn("nix develop path:.", result["diagnostics"])
+                        self.assertIn("devenv shell", result["diagnostics"])
+                        self.assertIn("nix develop .", result["diagnostics"])
 
     def test_environment_only_blockers_remain_blocked_in_text_and_json(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -930,8 +933,11 @@ class ProjectCheckTests(unittest.TestCase):
             (root / "source").write_text("a")
             (root / "target").mkdir()
             (root / "target" / "generated").write_text("a")
+            (root / ".devenv").mkdir()
+            (root / ".devenv" / "generated.nix").write_text("a")
             initial = checks.snapshot(root, [])
             (root / "target" / "generated").write_text("generated")
+            (root / ".devenv" / "generated.nix").write_text("generated")
             self.assertEqual(initial, checks.snapshot(root, []))
             (root / "replacement").write_text("b")
             os.replace(root / "replacement", root / "source")

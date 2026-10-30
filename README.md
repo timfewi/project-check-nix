@@ -234,8 +234,8 @@ to 100. The read-only plan includes every declaration for review before running
 project commands.
 
 Missing requirements, process-start errors and shell exit codes 126/127 report
-`blocked`, with instructions to enter `nix develop path:.` or repair the declared
-`devShells` tools. A failed command whose output names a missing toolchain or
+`blocked`, with instructions to enter `devenv shell` or `nix develop .`, or repair
+the declared `devenv.nix`/`devShells` tools. A failed command whose output names a missing toolchain or
 download also reports `blocked`; the same text in a passing check does not.
 Nonzero command exits include their exit status even when the command printed
 nothing. Diagnostics from the runner do not echo argv arguments; the invoked

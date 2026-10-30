@@ -43,8 +43,8 @@ SEMGREP = "@semgrep@"
 CA_CERT_FILE = "@cacert@/etc/ssl/certs/ca-bundle.crt"
 PROJECT_DOCS = "@projectDocs@"
 TOOLCHAIN_HINT = (
-    "Enter the project toolchain with `nix develop path:.` (or reload direnv), "
-    "then retry. If the tool is still unavailable, declare it in flake.nix "
+    "Enter the project toolchain with `devenv shell` (or `nix develop .`), "
+    "then retry. If the tool is still unavailable, declare it in devenv.nix or flake.nix "
     "devShells and check its executable permissions/interpreter."
 )
 
@@ -52,6 +52,7 @@ IGNORED = frozenset(
     {
         ".git",
         ".direnv",
+        ".devenv",
         ".cargo-tmp",
         ".ruff_cache",
         ".pytest_cache",
