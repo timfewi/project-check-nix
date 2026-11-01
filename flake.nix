@@ -53,14 +53,7 @@
         in
         {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              cargo
-              rustc
-              rustfmt
-              clippy
-              git
-              ruff
-            ];
+            packages = import ./packages/development-tools.nix { inherit pkgs; };
           };
         }
       );

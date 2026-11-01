@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .ast-index/
 /target/
+/.devenv*
+/devenv.local.nix
+/devenv.local.yaml

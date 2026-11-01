@@ -5,6 +5,7 @@ if [[ "${1:-}" != fast || "$#" -ne 1 ]]; then
   echo "Usage: bash scripts/check fast" >&2
   exit 2
 fi
+just --fmt --check
 mapfile -d '' -t nix_files < <(git ls-files --cached --others --exclude-standard -z -- '*.nix')
 nix fmt --no-write-lock-file -- --check "${nix_files[@]}"
 # Git-backed sources exclude ignored caches and build output from the store.

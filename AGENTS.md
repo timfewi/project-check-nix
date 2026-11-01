@@ -13,8 +13,9 @@
   changed ruleset is a changed store hash.
 - Run `project-check fast`, or its declared `bash scripts/check fast` entrypoint
   when the runner is unavailable. That gate runs the Nix formatter,
-  all-system no-build flake evaluation, rustfmt, Clippy with denied warnings,
-  native Rust unit/integration tests, and Ruff for the rule-replay helper.
+  all-system no-build flake evaluation, justfile formatting, rustfmt, Clippy
+  with denied warnings, native Rust unit/integration tests, and Ruff for the
+  rule-replay helper.
   The `quality-rules` Semgrep check is opt-in: run it when the portable rules
   or fixtures change.
 - Task-scoped staging is authorized. After review and required checks, commit

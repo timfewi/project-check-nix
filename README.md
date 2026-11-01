@@ -397,13 +397,55 @@ The gate uses Git-backed Nix sources so ignored build output and caches never
 enter the source snapshot. Add new source files to Git (intent-to-add is enough)
 before running the Nix gate; commits and publication are separate operations.
 
-For iterative work in the pinned development shell:
+### Developer environment and recipes
+
+`devenv.nix` and the flake's development shell share
+`packages/development-tools.nix`: Rust, Cargo, Clippy, rustfmt, Ruff, Git, Nix,
+nixfmt, `just` and the `devenv` CLI. Both use the same immutable nixpkgs
+revision; `devenv.lock` records the standalone environment's resolved inputs.
+No rustup download, additional Cachix trust or Git-hook installation is needed.
+
+The framework is pinned to `v2.4.0` as well. That release's
+`src/modules/latest-version` still reports `2.3.1`, so the CLI emits a
+"newer than devenv input" notice. The lock matches the CLI package's framework
+source hash; this notice does not mean that the input is unlocked.
+
+With an existing `devenv` CLI:
 
 ```sh
-nix develop -c cargo fmt --all -- --check
-nix develop -c cargo clippy --locked --all-targets -- -D warnings
-nix develop -c cargo test --locked
+devenv shell
 ```
+
+Without a separately installed CLI, bootstrap it from the pinned flake:
+
+```sh
+nix develop --no-write-lock-file -c devenv shell
+```
+
+The existing `nix develop --no-write-lock-file` entrypoint also remains usable
+directly. Shell entry is explicit; no direnv or native auto-entry approval is
+created by this repository. Local `.devenv*` state and operator overrides are
+ignored rather than committed.
+
+Inside either environment:
+
+```sh
+just                 # List recipes.
+just plan            # Read-only fast plan.
+just fast            # Pinned project-check baseline and authoritative gate.
+just check           # Alias for fast.
+just fmt             # Format owned sources.
+just fmt-check       # Check formatting without changing files.
+just lint            # Clippy, all targets, denied warnings.
+just test            # Native Rust unit and integration tests.
+just build           # Both Nix-packaged binaries, no installation/result links.
+```
+
+`devenv --no-tui --max-jobs 1 --cores 2 test` runs the explicit
+`project-check:environment-smoke` lifecycle task before `devenv:enterTest`.
+It checks the environment's tools and recipe formatting, not the Rust suite:
+it is not a substitute for `just fast` or `just test`.
+The fast gate checks `justfile` formatting as well as the existing checks.
 
 Tests include real synthetic child processes, byte-limit boundaries, closed and
 inherited pipes, SIGINT/SIGTERM group cleanup, real watch recovery/batching,
