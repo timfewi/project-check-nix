@@ -4,8 +4,8 @@
   "checks": [{
     "name": "project-check-fast",
     "argv": ["bash", "scripts/check", "fast"],
-    "requires": ["bash", "nix", "realpath"],
-    "input_paths": ["runtime/", "tests/", "scripts/", "packages/", "flake.nix", "flake.lock", ".project-checks.json"],
+    "requires": ["bash", "git", "nix"],
+    "input_paths": ["src/", "Cargo.toml", "Cargo.lock", "tests/", "scripts/", "packages/", "flake.nix", "flake.lock", ".project-checks.json"],
     "timeout_seconds": 1800,
     "profiles": ["fast"]
   }]

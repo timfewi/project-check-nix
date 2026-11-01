@@ -1,30 +1,25 @@
-# The packaged `project-check` runner.
-#
-# A dependency-free Python runner with immutable rules, the pinned scanner,
-# CA bundle and companion renderer baked in as store paths. Both executables
-# use `-I` shebangs to isolate them from the ambient Python environment.
+# Copy the binaries so current_exe resolves this immutable package prefix, not
+# the scanner-independent core. No environment override can replace the tools.
 { pkgs }:
 let
+  core = pkgs.callPackage ./project-check-core.nix { };
   qualityRules = pkgs.callPackage ./quality-rules.nix { };
-  projectDocs = pkgs.callPackage ./project-docs.nix { };
-  runner = pkgs.writeScriptBin "project-check" ''
-    #!${pkgs.python3}/bin/python3 -I
-    ${builtins.replaceStrings
-      [ "@qualityRules@" "@semgrep@" "@cacert@" "@projectDocs@" ]
-      [
-        (toString qualityRules)
-        "${pkgs.semgrep}/bin/semgrep"
-        (toString pkgs.cacert)
-        "${projectDocs}/bin/project-docs"
-      ]
-      (builtins.readFile ../runtime/project_check.py)
+  tooling = pkgs.writeText "project-check-tools.json" (
+    builtins.toJSON {
+      version = 1;
+      rules = toString qualityRules;
+      scanner = "${pkgs.semgrep}/bin/semgrep";
+      docs = "${core}/bin/project-docs";
+      ca = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     }
-  '';
+  );
 in
-pkgs.symlinkJoin {
-  name = "project-check";
-  paths = [
-    runner
-    projectDocs
-  ];
-}
+pkgs.runCommand "project-check-0.1.0"
+  {
+    meta.mainProgram = "project-check";
+  }
+  ''
+    mkdir -p "$out/bin" "$out/share/project-check"
+    cp ${core}/bin/project-check ${core}/bin/project-docs "$out/bin/"
+    ln -s ${tooling} "$out/share/project-check/tools.json"
+  ''

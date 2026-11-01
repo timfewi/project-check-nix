@@ -1,8 +1,9 @@
 # project-check-nix
 
-Portable, argv-only project verification runner. It reads a per-repository
+Native Rust, argv-only project verification runner. It reads a per-repository
 `.project-checks.json` manifest and runs the declared commands with pinned,
 explicit arguments — never implicit project discovery or shell evaluation.
+Both `project-check` and `project-docs` forbid unsafe code in first-party Rust.
 Packages, formatters and checks are exported for `x86_64-linux` and
 `aarch64-linux`; the fast gate selects the running machine's platform and
 evaluates both platforms without building the scanner.
@@ -97,10 +98,9 @@ placeholders, overlapping inputs/outputs and oversized sources fail. Missing
 tools or offline Nix inputs report an environment blocker.
 
 Older pinned runners can declare an explicit `project-docs --write` fast/full
-check, or bootstrap a reviewed copy of `runtime/project_docs.py` until the new
-runner is released and pinned. A source change here does not update installed
-host tools or existing repositories' pins; publication and host activation are
-separate operations.
+check using the separately exported native companion. A source change here does
+not update installed host tools or existing repositories' pins; publication and
+host activation remain separate operations.
 
 ## Check manifest contract
 
@@ -312,61 +312,103 @@ liteRuntime.extraPackages = [
 ];
 ```
 
-## Checks
+## Runtime safety and resource contracts
 
-- `nix build .#project-check` builds the runner.
-- `nix build .#checks.x86_64-linux.python-tests` runs Ruff lint/format and the
-  contract unit tests (fast, no scanner).
-- `nix build .#checks.x86_64-linux.quality-rules` round-trips the portable rules
-  against their fixtures with the real Semgrep scanner (opt-in, builds Semgrep).
-- `bash scripts/check fast` runs the Nix formatter, `nix flake check --no-build`,
-  Ruff lint/format and the Python unit tests.
+The package contains native executables and an immutable adjacent tooling
+manifest naming its pinned scanner, rules, CA bundle and renderer. Runtime
+environment variables cannot replace those paths. Development Cargo binaries
+use the source rule directory, a `semgrep` on PATH and a sibling renderer.
+The scanner may itself depend on Python; the runner/renderer do not embed or
+invoke a Python interpreter.
 
-The 2026-09-30 portability review passed the fast gate, including 25 runner
-contract tests in the native Nix unit check, and evaluated both Linux output
-sets. ShellCheck, deadnix, statix and the tracked-source privacy scan passed.
-ARM64 execution and the opt-in Semgrep replay were not run; source input pins
-and portable rule contents are unchanged.
+Rust prevents first-party unsafe code, not arbitrary project commands. The
+runner is not a sandbox, credential boundary or network-policy enforcement
+point. Dependencies and Unix APIs contain separately maintained unsafe
+internals. Repository metadata and paths must remain stable during inspection
+and writes. Atomic migration output exclusively creates a new temporary file,
+refuses symlink manifests and detects intervening byte changes before replace;
+it does not provide a lock against an adversarial concurrent writer.
 
-The 2026-10-01 expected-diagnostic review passed `project-check fast` with 28
-native contract tests, Ruff and Nix evaluation for both Linux platforms. The
-exact-line regression failed before the change, then passed with coverage for
-additional warnings, count overflow, nonzero exits, blockers and timeouts.
-ShellCheck, deadnix, statix and a complete tracked-source privacy scan passed
-with zero findings. Only the small runner script package was built; its
-dependencies were already present. That package also passed the real runtime
-fast gate with four declared MicroVM notices retained in its report. Source
-input pins and baseline rules are unchanged; no scanner rebuild, ARM64
-execution, optional replay or host installation ran.
+The Rust runner retains manifest versions 1/2 and report version 1. Deliberate
+input hardening rejects duplicate JSON keys, nonstandard NaN/Infinity tokens,
+NUL paths, manifests over 1 MiB, more than 128 checks or more than 4096 arguments
+per check. Watch ignores permit at most 256 patterns of 4096 bytes each; compiled
+fnmatch-compatible matchers are reused between edits, including literal unmatched
+brackets and separator-crossing stars. JSON nesting uses the parser's bounded
+recursion limit. Scanner reports are read with a 16 MiB bound; aggregate reports
+have a 32 MiB budget with capacity reserved for every remaining check identity.
+Exceeding a bound cannot establish success. These limits bound runner reads and
+retention, not a child process's memory, disk writes or escaped descendants.
 
-The 2026-10-02 output-bound review reproduced an unchecked output overflow and
-passed the fast gate with 32 native contract tests, Ruff and both Linux output
-evaluations. Regressions cover benign and warning-bearing overflow, environment
-diagnostics in a truncated prefix, exact-boundary capture and timeout after
-closed output. Cleanup also signals each owned process group only once. The
-packaged CLI rejected a 4 MiB overflow while completing the
-following check; its real Python baseline passed. Deadnix and statix passed.
-Rules, dependencies and manifest fields are unchanged. No full scanner replay,
-ARM64 execution or host installation ran.
+SIGINT exits 130 and SIGTERM exits 143 after cleaning up the active owned check
+process group. Leader state is observed without reaping until group cleanup,
+avoiding a signal to a recycled leader PID. A descendant deliberately escaping
+the group remains outside this guarantee. Missing or malformed scanner reports
+never downgrade an already observed timeout/overflow failure to a blocker.
 
-The 2026-10-02 changed-plan review reproduced inherited Git overrides, filesystem
-monitor and filter execution, and incorrectly scoped nested-project paths. Git
-metadata capture now reuses the runner's bounded process collection; change
-paths are relative to the selected project. External filters are overridden
-within explicit configuration bounds, and submodule contents use their own
-plans while changed submodule commits remain visible. The implementation is in
-`runtime/project_check.py`; `flake.nix` declares Git for the real fixture tests.
+Watch still polls and batches filesystem changes, not Git status. It also
+tracks ctime/device metadata, detecting ordinary equal-size edits whose mtime
+was restored. It does not hash every file or promise adversarial, race-free
+content monitoring. Trees above 200000 entries or depth 256 block rather than
+consume unbounded traversal state.
 
-The fast gate passed with 39 native contract tests, Ruff and both Linux output
-evaluations. Deadnix and statix passed. A real source CLI changed plan returned
-the current four changed paths without executing checks. Regression fixtures
-cover repository/configuration overrides, hooks, clean/process filters,
-newlines in project paths, renamed/untracked files, submodule ownership,
-unrepresentable/excessive filter configuration and output bounds. Upstream
-[git-status documentation](https://git-scm.com/docs/git-status) confirmed
-root-relative porcelain paths and the NUL-delimited rename contract; the
-implementation was verified with Git 2.55.
+The renderer parses Python literals with a Rust AST parser, never an interpreter.
+Syntax support comes from pinned `rustpython-parser` 0.4.0, not the operator's
+installed Python; newer Python grammar features are not implicitly supported.
+Preflight limits Python sources to 100000 lexer tokens, 1024 per logical
+statement, 256 active expression tokens, 128 delimiter/indentation levels and
+128 total `elif` clauses per source (including unrelated chains).
+Numeric tokens are limited to 4096 bytes. F-string bodies are limited to 4096
+bytes and 128 structural punctuation marks/whitespace-separated words, including
+literal text; ordinary unrelated f-strings remain accepted. Literal evaluation
+also has a 128-level limit. Unsupported nonempty-set scalar formatting is
+rejected explicitly; JSON cannot represent Python sets, bytes or complex values.
+Plain scalar formatting retains Python boolean/null spelling. Quoted Python
+containers use pinned Unicode 17 printability data, including nonprinting
+separators, format characters, private-use and unassigned code points.
 
-Dependency pins and portable rules are unchanged. No scanner replay, ARM64
-execution, publication or host installation ran. Next: review malformed Git
-records and linked-worktree plans.
+TOML is lexically checked before recursive deserialization. Its conservative
+combined-depth estimate must satisfy `1 + 2H + K(C + 1) + C <= 128`, where `H`
+is the maximum table-header component count, `K` the maximum dotted-key
+component count and `C` the maximum value-container nesting. Global maxima
+can reject large combinations on unrelated branches; string contents and
+comments do not contribute fake structure. Exceeding this limit is a normal
+error and does not replace generated targets.
+
+Native startup, bounded buffering and shared parsing remove the Python runner
+startup path. No measured end-to-end speedup is claimed: Semgrep, Nix, compilers
+and project tests still run. Benchmark targets and workloads must be approved
+and measured separately with identical coverage and cache states.
+
+## Checks and local development
+
+- `project-check fast` runs the installed baseline and the declared fast gate.
+- `bash scripts/check fast` runs Nix formatting checks, all-system no-build flake
+  evaluation and the native Rust gate without invoking the baseline itself.
+- `nix build .#checks.x86_64-linux.rust-tests` builds both binaries and runs
+  rustfmt, Clippy with denied warnings, Rust unit/integration tests and Ruff for
+  the remaining portable-rule replay helper. It does not build Semgrep.
+- `nix build .#project-check` builds the complete pinned runtime package.
+- `nix build .#project-docs` builds the standalone native renderer.
+- `nix build .#checks.x86_64-linux.quality-rules` replays the unchanged portable
+  rules against their fixtures with real Semgrep (opt-in).
+
+The gate uses Git-backed Nix sources so ignored build output and caches never
+enter the source snapshot. Add new source files to Git (intent-to-add is enough)
+before running the Nix gate; commits and publication are separate operations.
+
+For iterative work in the pinned development shell:
+
+```sh
+nix develop -c cargo fmt --all -- --check
+nix develop -c cargo clippy --locked --all-targets -- -D warnings
+nix develop -c cargo test --locked
+```
+
+Tests include real synthetic child processes, byte-limit boundaries, closed and
+inherited pipes, SIGINT/SIGTERM group cleanup, real watch recovery/batching,
+schema migration symlink protection, exact warning policy, scanner report
+classification, safe Git fixtures and native renderer behavior. The fast gate
+executes the native platform only; evaluating ARM64 outputs is not ARM64 runtime
+verification. The pre-rewrite source analysis and its historical references
+remain in `docs/rust-rewrite-analysis.md`.

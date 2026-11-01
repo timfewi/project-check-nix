@@ -5,17 +5,18 @@
 - Keep code, comments, documentation, and user-facing text in English.
 - Do not add credentials, authentication stores, personal files, private keys,
   caches, or other machine state.
-- Prefer Nix and small shell helpers. The runner is a single dependency-free
-  Python file (`runtime/project_check.py`); keep it standard-library-only and
-  argv-only. Do not add a third-party Python dependency.
+- Prefer Nix and small shell helpers. Both runtime programs are native Rust
+  binaries; keep first-party Rust `#![forbid(unsafe_code)]`, argv-only and
+  dependency-pinned with Cargo.lock. Do not add a Python runtime or interpreter.
 - Keep the portable quality rules minimal and language-portable. The
   `.semgrep/portable` rules ship unchanged into the immutable rules package; a
   changed ruleset is a changed store hash.
 - Run `project-check fast`, or its declared `bash scripts/check fast` entrypoint
   when the runner is unavailable. That gate runs the Nix formatter,
-  `nix flake check --no-build`, Ruff lint/format and the Python unit tests. The
-  `quality-rules` Semgrep check is opt-in: run it when the portable rules or
-  fixtures change.
+  all-system no-build flake evaluation, rustfmt, Clippy with denied warnings,
+  native Rust unit/integration tests, and Ruff for the rule-replay helper.
+  The `quality-rules` Semgrep check is opt-in: run it when the portable rules
+  or fixtures change.
 - Task-scoped staging is authorized. After review and required checks, commit
   the task changes and push to the current branch's existing upstream. Preserve
   unrelated work.
