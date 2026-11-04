@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(unix)]
 
 use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
@@ -35,7 +36,7 @@ fn script(path: &Path, code: &str) {
 fn capture_preserves_exact_boundary_and_fails_on_one_extra_byte() {
     for (extra, failure) in [(false, None), (true, Some(CaptureFailure::OutputLimit))] {
         let code = format!(
-            "dd if=/dev/zero bs=1048576 count=4 status=none; {}",
+            "dd if=/dev/zero bs=1048576 count=4 2>/dev/null; {}",
             if extra { "printf x" } else { ":" }
         );
         let result = capture(
@@ -318,12 +319,30 @@ fn wait_path(path: &Path) {
     }
 }
 fn running(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .is_some_and(|stat| {
-            stat.rsplit_once(')')
-                .is_some_and(|(_, tail)| !tail.trim_start().starts_with('Z'))
-        })
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .is_some_and(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, tail)| !tail.trim_start().starts_with('Z'))
+            })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Darwin has no procfs. Inspect state rather than kill(pid, 0), which
+        // also reports zombie children as alive until their adopter reaps them.
+        let output = Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .expect("native ps is available");
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|state| state != 'Z')
+    }
 }
 
 #[test]

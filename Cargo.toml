@@ -6,17 +6,35 @@ rust-version = "1.88"
 license = "MIT"
 description = "Explicit, bounded, argv-only project verification"
 
+[features]
+test-support = []
+
+[[bin]]
+name = "project-check-contract-child"
+path = "tests/support/native_child.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+
 [dependencies]
-nix = { version = "=0.30.1", features = ["fs", "poll", "signal", "process"] }
 regex = "=1.12.2"
 rustpython-parser = { version = "=0.4.0", default-features = false, features = ["location", "num-bigint"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["preserve_order", "arbitrary_precision"] }
 sha2 = "=0.10.9"
-signal-hook = "=0.3.18"
 tempfile = "=3.23.0"
 toml = { version = "=0.9.8", features = ["preserve_order"] }
 toml_parser = "=1.1.5"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.30.1", features = ["fs", "poll", "signal", "process"] }
+rustix = { version = "=1.1.6", features = ["process"] }
+signal-hook = "=0.3.18"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "=3.5.0"
+mio = { version = "=1.2.4", default-features = false, features = ["os-poll", "os-ext"] }
+process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "job-object"] }
 
 [profile.release]
 lto = "thin"

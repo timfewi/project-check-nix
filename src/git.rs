@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
 use std::time::Duration;
@@ -14,17 +15,23 @@ fn output(
     arguments: &[OsString],
     allowed_codes: &[i32],
     signals: &Signals,
+    empty_config: &Path,
 ) -> Result<Vec<u8>> {
     signals.check()?;
-    let mut command = Command::new("git");
+    let program = crate::runner::resolve_program("git", root)
+        .ok_or_else(|| Error::new("required native Git executable is unavailable"))?;
+    let mut command = Command::new(program);
     command.args(arguments).current_dir(root).env_clear();
-    for (key, value) in env::vars_os().filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
-    {
+    for (key, value) in env::vars_os().filter(|(key, _)| {
+        !key.to_string_lossy()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
+    }) {
         command.env(key, value);
     }
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", empty_config)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
@@ -50,16 +57,22 @@ fn output(
 }
 
 pub fn changed_paths(root: &Path, signals: &Signals) -> Result<Vec<String>> {
-    let mut command: Vec<OsString> = [
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-    ]
-    .into_iter()
-    .map(Into::into)
-    .collect();
+    // An owned empty file/directory works with native Git on every platform.
+    // No shell, device-name conventions, or inherited global config is needed.
+    let isolation = tempfile::Builder::new()
+        .prefix("project-check-git-")
+        .tempdir()?;
+    let empty_config = isolation.path().join("config");
+    fs::write(&empty_config, "")?;
+    let empty_hooks = isolation.path().join("hooks");
+    fs::create_dir(&empty_hooks)?;
+    let mut command: Vec<OsString> = ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let mut hooks_setting = OsString::from("core.hooksPath=");
+    hooks_setting.push(&empty_hooks);
+    command.extend([OsString::from("-c"), hooks_setting]);
     let mut query = command.clone();
     query.extend(
         [
@@ -72,7 +85,7 @@ pub fn changed_paths(root: &Path, signals: &Signals) -> Result<Vec<String>> {
         .into_iter()
         .map(Into::into),
     );
-    let names = output(root, &query, &[0, 1], signals)?;
+    let names = output(root, &query, &[0, 1], signals, &empty_config)?;
     let drivers: BTreeSet<&[u8]> = names
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
@@ -107,7 +120,7 @@ pub fn changed_paths(root: &Path, signals: &Signals) -> Result<Vec<String>> {
     }
     query = command.clone();
     query.extend(["rev-parse", "--show-prefix"].into_iter().map(Into::into));
-    let prefix = output(root, &query, &[0], signals)?;
+    let prefix = output(root, &query, &[0], signals, &empty_config)?;
     command.extend(
         [
             "status",
@@ -121,7 +134,7 @@ pub fn changed_paths(root: &Path, signals: &Signals) -> Result<Vec<String>> {
         .into_iter()
         .map(Into::into),
     );
-    let raw = output(root, &command, &[0], signals)?;
+    let raw = output(root, &command, &[0], signals, &empty_config)?;
     parse_status(&prefix, &raw)
 }
 
@@ -158,9 +171,12 @@ pub fn parse_status(prefix: &[u8], raw: &[u8]) -> Result<Vec<String>> {
                 .map_err(|_| Error::new("non-UTF-8 Git path is unsupported"))?;
             if path.is_empty()
                 || Path::new(path).is_absolute()
-                || Path::new(path)
-                    .components()
-                    .any(|component| matches!(component, Component::ParentDir))
+                || Path::new(path).components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                    )
+                })
             {
                 return Err(Error::new("invalid Git path"));
             }

@@ -155,9 +155,12 @@ fn local_path(root: &Path, value: &Json, output: bool) -> DocResult<PathBuf> {
         .ok_or_else(|| DocError::new("Documentation paths must be nonempty strings"))?;
     let relative = Path::new(name);
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|p| matches!(p, Component::ParentDir | Component::Prefix(_)))
+        || relative.components().any(|p| {
+            matches!(
+                p,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
     {
         return Err(DocError::new(
             "Documentation paths must stay inside the repository",
@@ -176,7 +179,7 @@ fn local_path(root: &Path, value: &Json, output: bool) -> DocResult<PathBuf> {
             }
             candidate.push(part);
             match fs::symlink_metadata(&candidate) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+                Ok(metadata) if util::is_link(&metadata) => {
                     return Err(DocError::new("Documentation paths must not use symlinks"));
                 }
                 Ok(_) => (),
@@ -225,6 +228,9 @@ fn nix_source_program(
         .filter(|v| ATTRIBUTE.is_match(v))
         .ok_or_else(|| DocError::new("Invalid Nix documentation attribute"))?;
     signals.check()?;
+    let program = crate::runner::resolve_program(program, root).ok_or_else(|| {
+        DocError::blocked("Required program is missing: nix; enter the pinned toolchain")
+    })?;
     let mut command = Command::new(program);
     command
         .args([
@@ -960,6 +966,7 @@ pub fn main(args: impl Iterator<Item = String>) -> i32 {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     struct Fixture {
@@ -1010,6 +1017,7 @@ mod tests {
     fn values(document: Json) -> Value {
         Value::from_json(document)
     }
+    #[cfg(unix)]
     fn write_shell_script(path: &Path, body: &str) {
         static SHELL: LazyLock<PathBuf> = LazyLock::new(|| {
             std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
@@ -1257,19 +1265,22 @@ mod tests {
         assert!(local_path(fixture.root(), &json!("directory.md"), true).is_err());
         assert!(local_path(fixture.root(), &json!("missing/directory.md"), true).is_err());
         assert!(local_path(fixture.root(), &json!("target.txt"), true).is_err());
-        symlink("package.json", fixture.root().join("link.json")).unwrap();
-        symlink("missing.json", fixture.root().join("dangling.json")).unwrap();
-        symlink(fixture.root(), fixture.root().join("linkdir")).unwrap();
-        for name in [
-            "link.json",
-            "dangling.json",
-            "linkdir/package.json",
-            "linkdir/new.md",
-        ] {
-            assert!(
-                local_path(fixture.root(), &json!(name), false).is_err(),
-                "{name}"
-            );
+        #[cfg(unix)]
+        {
+            symlink("package.json", fixture.root().join("link.json")).unwrap();
+            symlink("missing.json", fixture.root().join("dangling.json")).unwrap();
+            symlink(fixture.root(), fixture.root().join("linkdir")).unwrap();
+            for name in [
+                "link.json",
+                "dangling.json",
+                "linkdir/package.json",
+                "linkdir/new.md",
+            ] {
+                assert!(
+                    local_path(fixture.root(), &json!(name), false).is_err(),
+                    "{name}"
+                );
+            }
         }
     }
 
@@ -1326,6 +1337,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn symlink_outputs_are_rejected_and_existing_modes_are_preserved() {
         let fixture = Fixture::new();
         symlink("package.json", fixture.root().join("README.md")).unwrap();
@@ -1461,6 +1473,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn nix_uses_offline_argv_and_separate_bounded_diagnostics() {
         let fixture = Fixture::new();
         let fake = fixture.root().join("fake-nix");
@@ -1546,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn nix_stdout_and_combined_capture_limits_are_enforced() {
         let fixture = Fixture::new();
         let fake = fixture.root().join("fake-nix");

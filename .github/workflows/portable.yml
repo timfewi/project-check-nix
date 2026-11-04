@@ -1,0 +1,139 @@
+name: Portable verification
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/cross-platform-runtime]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  SEMGREP_SEND_METRICS: "off"
+  SEMGREP_ENABLE_VERSION_CHECK: "0"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  native:
+    name: Native / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            python_arch: x64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            python_arch: arm64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            python_arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            python_arch: x64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            python_arch: x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+      - name: Install the declared minimum Rust toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.88.0
+      - name: Formatting, lint and native contracts
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --features test-support -- -D warnings
+          cargo test --locked --features test-support
+      - name: Build the native archive payload
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bundle="$RUNNER_TEMP/project-check-bundle"
+          if [[ "$RUNNER_OS" == Windows ]]; then bundle="$(cygpath -u "$bundle")"; fi
+          bash scripts/package "$TARGET" "$bundle"
+      - name: Install into a prefix containing spaces (Unix)
+        if: runner.os != 'Windows'
+        run: bash "$RUNNER_TEMP/project-check-bundle/install.sh" --prefix "$RUNNER_TEMP/project check installed" --python python
+      - name: Install into a prefix containing spaces (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP/project-check-bundle/install.ps1" -Prefix "$env:RUNNER_TEMP/project check installed" -Python python'
+      - name: Exercise the installed package and real scanner
+        run: |
+          installed_bin="$RUNNER_TEMP/project check installed/bin"
+          if [[ "$RUNNER_OS" == Windows ]]; then installed_bin="$(cygpath -u "$installed_bin")"; fi
+          export PATH="$installed_bin:$PATH"
+          export SEMGREP_SETTINGS_FILE="$RUNNER_TEMP/semgrep-settings.yml"
+          export SEMGREP_LOG_FILE="$RUNNER_TEMP/semgrep.log"
+          mkdir -p "$RUNNER_TEMP/foreign/project/lib"
+          cp tests/portable-quality/foreign.py "$RUNNER_TEMP/foreign/project/lib/foreign.py"
+          scanner="$RUNNER_TEMP/project check installed/lib/semgrep/bin/semgrep"
+          if [[ "$RUNNER_OS" == Windows ]]; then scanner="$RUNNER_TEMP/project check installed/lib/semgrep/Scripts/semgrep.exe"; fi
+          "$scanner" scan --config .semgrep/portable --strict --json --no-rewrite-rule-ids \
+            --metrics=off --disable-version-check --jobs 1 "$RUNNER_TEMP/foreign/project/lib" > "$RUNNER_TEMP/scanner-report.json"
+          python scripts/check-semgrep-tests.py "$RUNNER_TEMP/scanner-report.json" .semgrep/portable "$RUNNER_TEMP/foreign/project/lib"
+          mkdir -p "$RUNNER_TEMP/clean project"
+          cd "$RUNNER_TEMP/clean project"
+          printf 'value = 1\n' > clean.py
+          printf '{"version":2,"checks":[{"name":"native","argv":["project-docs","--help"],"requires":["project-docs"],"timeout_seconds":30,"profiles":["fast"]}]}\n' > .project-checks.json
+          project-check fast --plan --json
+          project-check fast --json
+          project-docs --help
+      - name: Archive native binaries, assets and installers
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          package_temp="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == Windows ]]; then package_temp="$(cygpath -u "$package_temp")"; fi
+          cd "$package_temp/project-check-bundle"
+          tar -czf "$package_temp/project-check-$TARGET.tar.gz" .
+          cd "$package_temp"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "project-check-$TARGET.tar.gz" > "project-check-$TARGET.tar.gz.sha256"
+          else
+            shasum -a 256 "project-check-$TARGET.tar.gz" > "project-check-$TARGET.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: project-check-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/project-check-${{ matrix.target }}.tar.gz
+            ${{ runner.temp }}/project-check-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  nix:
+    name: Nix / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
+      - name: Run the repository's authoritative gate
+        run: nix develop --no-write-lock-file -c bash scripts/check fast
+      - name: Build the complete package and replay pinned baseline rules
+        shell: bash
+        run: |
+          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          nix build --no-link --no-write-lock-file .#project-check ".#checks.$system.quality-rules"

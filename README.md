@@ -4,13 +4,128 @@ Native Rust, argv-only project verification runner. It reads a per-repository
 `.project-checks.json` manifest and runs the declared commands with pinned,
 explicit arguments — never implicit project discovery or shell evaluation.
 Both `project-check` and `project-docs` forbid unsafe code in first-party Rust.
-Packages, formatters and checks are exported for `x86_64-linux` and
-`aarch64-linux`; the fast gate selects the running machine's platform and
-evaluates both platforms without building the scanner.
+Native backends target Windows, macOS and Linux. Nix remains an optional,
+reproducible packaging and development path. Project commands are still explicit:
+a portable runner does not translate Bash scripts or supply a project's compiler.
 
 This repository is the standalone packaging of the shared `project-check` runner
 previously embedded in the `example-host` toolchain. New repositories point
 their `.project-checks.json` at this installed runner instead of copying it.
+
+## Native installation without Nix
+
+The `Portable verification` workflow builds archives and checksums as CI
+artifacts. Publication as a GitHub Release is a separate operation. Download the
+artifact for your platform, check its SHA-256, and extract the `.tar.gz` before
+installing. The archive contains both Rust binaries, fixed rules, dependency
+hashes, and the two installers. A bare `cargo install` or copied executable is
+not a complete installation.
+
+| Native CI target | Runtime and scanner installation |
+| --- | --- |
+| Linux x64 | Ubuntu 22.04 / glibc 2.35 baseline; Python 3.10+ with `venv` |
+| Linux ARM64 | Ubuntu 22.04 / glibc 2.35 baseline; Python 3.10+ with `venv` |
+| macOS Apple Silicon | ARM64 Python 3.10+ with `venv` |
+| macOS Intel | x64 Python 3.10+; portable scanner pinned to Intel-compatible Semgrep 1.182.0 |
+| Windows x64 | Native PowerShell installation; x64 Python 3.10+ with `venv`; Semgrep's Windows support is beta |
+| Windows WSL2 | Use the Linux archive or the Nix installation inside WSL2 |
+
+The workflow runs native contracts and a real scanner replay on each native
+target; a cross-compile alone is not evidence of runtime support. Other Linux
+distributions need compatible glibc and Python; Alpine/musl and other CPU
+architectures are not native archive targets. Nix can supply an isolated runtime
+on its supported Linux hosts. WSL2 follows the Linux path; it does not run native
+Windows project tools.
+
+From an extracted archive, choose a **new absolute installation directory**:
+
+```sh
+bash install.sh --prefix "$HOME/.local/share/project-check/0.1.0" --python python3
+export PATH="$HOME/.local/share/project-check/0.1.0/bin:$PATH"
+```
+
+On Windows, run the extracted script in PowerShell:
+
+```powershell
+./install.ps1 -Prefix "$env:LOCALAPPDATA/Programs/project-check/0.1.0" -Python python
+$env:Path = "$env:LOCALAPPDATA/Programs/project-check/0.1.0/bin;$env:Path"
+```
+
+These PATH changes affect the current terminal. Persist the same `bin` directory
+in your user PATH if desired. Installation needs package-index access and
+downloads the scanner's hash-locked dependencies into `lib/semgrep`, using your
+existing Python. Runner and renderer remain native Rust and do not execute
+Python source. No global Python packages, hooks, Nix, or administrator privileges
+are required. On Debian/Ubuntu, Python's `venv` support may be a separate package.
+
+Installers refuse existing prefixes. Use a new prefix when upgrading and point
+PATH at its `bin`; removing an old prefix uninstalls that copy. A failed install
+leaves its partial directory for inspection. The installed scanner environment
+depends on its original prefix and Python installation: reinstall into a new
+prefix to move it. Package-relative runner assets themselves are relocatable.
+Do not remove `share/project-check/tools.json` or copy only the binaries; installed
+metadata fixes the scanner and rules paths without runtime environment overrides.
+
+Confirm the installation from a project directory:
+
+```sh
+project-check --help
+project-check baseline --json
+project-check fast --plan --json
+```
+
+The `baseline` profile needs no manifest. `fast` and `full` need the project's
+`.project-checks.json` and declared tools. For example, this check uses the same
+native command on all three operating systems:
+
+```json
+{
+  "version": 2,
+  "checks": [{
+    "name": "rust-format",
+    "argv": ["cargo", "fmt", "--all", "--", "--check"],
+    "requires": ["cargo"],
+    "timeout_seconds": 60,
+    "profiles": ["fast", "full"]
+  }]
+}
+```
+
+On Windows, executable lookup supports native `.exe`/`.com` programs and explicit
+paths. `.cmd`/`.bat` shims do not trigger an implicit shell. Name an interpreter
+explicitly when a check needs one; for JavaScript tools, prefer `node` followed
+by the tool's script path. Manifest versions 1/2 retain their existing semantics;
+no checks are silently omitted because of the operating system. Nix commands and
+Nix documentation sources still require Nix; JSON/TOML/Python-literal sources do
+not. The repository's own authoritative gate intentionally remains Nix-based.
+
+For development without Nix, use Rust 1.88+ and Git:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --features test-support -- -D warnings
+cargo test --locked --features test-support
+cargo build --release --locked --bin project-check --bin project-docs
+```
+
+The feature builds a native child-process fixture for the common contracts; it
+is excluded from installed packages. Unix-specific signal and shell contracts
+remain additional tests. Run `bash scripts/package TARGET /new/output/directory`
+to assemble an archive payload from the checkout. Rust does not need Nix;
+running project checks also needs the scanner installation above. Update portable
+scanner pins deliberately, then replay the immutable rules on all targets:
+
+```sh
+uv pip compile --universal --python-version 3.10 --generate-hashes --no-header \
+  packaging/semgrep.in --output-file packaging/semgrep-requirements.txt
+```
+
+Semgrep 1.183+ no longer supplies an Intel macOS engine. The portable lock stays
+at 1.182.0; Nix retains its separately pinned scanner. The Nix flake exports core,
+renderer, dev shells and native test checks for Linux x64/ARM64 and both Darwin
+architectures. Its complete `project-check` package and scanner fixtures are
+exported for Linux and Apple Silicon only, because the pinned nixpkgs scanner
+lacks an Intel engine. Intel Mac users should use the native installer.
 
 ## What it runs
 
@@ -200,9 +315,11 @@ when a check closes its output or a descendant keeps its output pipe open.
 A timeout reports `failed` with `timed_out` in JSON: a slow check is a gate
 problem (raise `timeout_seconds` or move it to `full`), not a missing tool.
 
-Checks run with a per-run scratch `TMPDIR`. `CARGO_TARGET_DIR` and
+Checks run with a per-run scratch `TMPDIR` (also `TMP` and `TEMP` on Windows).
+`CARGO_TARGET_DIR` and
 `RUFF_CACHE_DIR` live in a persistent per-project cache,
-`$XDG_CACHE_HOME/project-check/<name>-<hash>/` (default `~/.cache`), so Rust
+`$XDG_CACHE_HOME/project-check/<name>-<hash>/` (default `~/.cache`, or
+`%LOCALAPPDATA%` on Windows), so Rust
 checks reuse earlier builds without sharing the project's own `target/`, whose
 different `RUSTFLAGS` would force rebuilds. Deleting the cache is always safe.
 Without a writable user cache, such as inside a Nix build, the caches fall back
@@ -234,8 +351,9 @@ to 100. The read-only plan includes every declaration for review before running
 project commands.
 
 Missing requirements, process-start errors and shell exit codes 126/127 report
-`blocked`, with instructions to enter `devenv shell` or `nix develop .`, or repair
-the declared `devenv.nix`/`devShells` tools. A failed command whose output names a missing toolchain or
+`blocked`, with instructions to install the declared toolchain. Nix projects can
+enter `devenv shell` or `nix develop .`, or repair their declared development
+shell. A failed command whose output names a missing toolchain or
 download also reports `blocked`; the same text in a passing check does not.
 Nonzero command exits include their exit status even when the command printed
 nothing. Diagnostics from the runner do not echo argv arguments; the invoked
@@ -323,7 +441,7 @@ invoke a Python interpreter.
 
 Rust prevents first-party unsafe code, not arbitrary project commands. The
 runner is not a sandbox, credential boundary or network-policy enforcement
-point. Dependencies and Unix APIs contain separately maintained unsafe
+point. Dependencies and platform APIs contain separately maintained unsafe
 internals. Repository metadata and paths must remain stable during inspection
 and writes. Atomic migration output exclusively creates a new temporary file,
 refuses symlink manifests and detects intervening byte changes before replace;
@@ -340,17 +458,24 @@ have a 32 MiB budget with capacity reserved for every remaining check identity.
 Exceeding a bound cannot establish success. These limits bound runner reads and
 retention, not a child process's memory, disk writes or escaped descendants.
 
-SIGINT exits 130 and SIGTERM exits 143 after cleaning up the active owned check
-process group. Leader state is observed without reaping until group cleanup,
-avoiding a signal to a recycled leader PID. A descendant deliberately escaping
-the group remains outside this guarantee. Missing or malformed scanner reports
-never downgrade an already observed timeout/overflow failure to a blocker.
+On Unix, SIGINT exits 130 and SIGTERM exits 143 after cleaning up the active owned
+check process group. Leader state is observed without reaping until group
+cleanup, avoiding a signal to a recycled leader PID. On Windows, Ctrl+C exits 130;
+the runner assigns the suspended child to a Job Object before resuming it and
+cleans up the whole job through stable handles. Abruptly killing the runner is
+outside the orderly cleanup guarantee, as are Unix descendants that deliberately
+escape their process group. Missing or malformed scanner reports never downgrade
+an observed timeout/overflow failure to a blocker. File replacement flushes the
+new file before replacement; directory fsync is additionally performed on Unix.
+Windows does not claim equivalent directory crash-durability through safe std.
 
-Watch still polls and batches filesystem changes, not Git status. It also
-tracks ctime/device metadata, detecting ordinary equal-size edits whose mtime
-was restored. It does not hash every file or promise adversarial, race-free
-content monitoring. Trees above 200000 entries or depth 256 block rather than
-consume unbounded traversal state.
+Watch polls and batches filesystem changes, not Git status. Unix additionally
+tracks ctime/device metadata to detect ordinary equal-size restored-mtime edits.
+Windows streams SHA-256 fingerprints, with a 64 MiB per-file and 256 MiB
+per-snapshot read budget; exceeding either blocks with `watch_ignore` guidance.
+Links and Windows reparse points are not followed. Logical ignore paths use `/`
+on every platform. Trees above 200000 entries or depth 256 block. Polling does not
+promise adversarial, race-free content monitoring.
 
 The renderer parses Python literals with a Rust AST parser, never an interpreter.
 Syntax support comes from pinned `rustpython-parser` 0.4.0, not the operator's

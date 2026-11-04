@@ -15,7 +15,7 @@ RULE_ID = re.compile(r"^\s*- id:\s*([a-z0-9-]+)\s*$", re.MULTILINE)
 
 def load_report(path: Path) -> dict:
     try:
-        report = json.loads(path.read_text())
+        report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(
             f"scanner report is unavailable or invalid: {error}"
@@ -29,7 +29,7 @@ def validate(report: dict, rules: Path, fixtures: Path) -> int:
     declared_ids = [
         rule_id
         for path in rules.rglob("*.yml")
-        for rule_id in RULE_ID.findall(path.read_text())
+        for rule_id in RULE_ID.findall(path.read_text(encoding="utf-8"))
     ]
     rule_ids = set(declared_ids)
     if len(rule_ids) != len(declared_ids):
@@ -42,7 +42,9 @@ def validate(report: dict, rules: Path, fixtures: Path) -> int:
     if not rule_ids or not targets or report.get("errors"):
         raise ValueError("missing rules/fixtures or Semgrep scan errors")
     for path in targets:
-        for line, text in enumerate(path.read_text().splitlines(), start=1):
+        for line, text in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
             if match := ANNOTATION.match(text):
                 destination = expected if match[1] == "ruleid" else negative
                 for rule_id in match[2].split(","):
@@ -53,11 +55,11 @@ def validate(report: dict, rules: Path, fixtures: Path) -> int:
     for annotations in (expected, negative):
         if {item[0] for item in annotations} != rule_ids:
             raise ValueError("every rule requires positive and negative examples")
-    scanned = set(report["paths"]["scanned"])
+    scanned = {Path(path).as_posix() for path in report["paths"]["scanned"]}
     if not {path.as_posix() for path in targets} <= scanned:
         raise ValueError("Semgrep skipped a fixture")
     actual = {
-        (item["check_id"], item["path"], item["start"]["line"])
+        (item["check_id"], Path(item["path"]).as_posix(), item["start"]["line"])
         for item in report["results"]
     }
     if actual != expected or actual & negative:

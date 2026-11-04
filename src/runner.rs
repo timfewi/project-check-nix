@@ -10,14 +10,13 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub const TOOLCHAIN_HINT: &str = "Enter the project toolchain with `devenv shell` (or `nix develop .`), then retry. If the tool is still unavailable, declare it in devenv.nix or flake.nix devShells and check its executable permissions/interpreter.";
+pub const TOOLCHAIN_HINT: &str = "Install the required project tool or enter its development environment, then retry. For Nix projects use `devenv shell` (or `nix develop .`) and declare missing tools in devenv.nix or flake.nix devShells. Check PATH and executable permissions/interpreter. On Windows use native .exe/.com programs; scripts require an explicitly declared interpreter.";
 
 #[derive(Clone, Debug)]
 pub struct Tools {
@@ -33,7 +32,7 @@ impl Default for Tools {
             scanner: PathBuf::from("semgrep"),
             docs: env::current_exe()
                 .unwrap_or_default()
-                .with_file_name("project-docs"),
+                .with_file_name(format!("project-docs{}", env::consts::EXE_SUFFIX)),
             ca: None,
         }
     }
@@ -46,13 +45,18 @@ impl Tools {
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| Error::new("runner has no package prefix"))?;
+        Self::from_prefix(prefix)
+    }
+
+    fn from_prefix(prefix: &Path) -> Result<Self> {
         let path = prefix.join("share/project-check/tools.json");
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error.into()),
             Ok(_) => {
                 let config = util::parse_json(&util::read_limited(&path, 16384)?)?;
-                if config["version"] != 1 {
+                let version = config["version"].as_u64().unwrap_or(0);
+                if !matches!(version, 1 | 2) {
                     return Err(Error::new("unsupported packaged tooling manifest"));
                 }
                 let field = |name: &str| -> Result<PathBuf> {
@@ -61,45 +65,137 @@ impl Tools {
                         .filter(|value| !value.contains('\0'))
                         .ok_or_else(|| Error::new("invalid packaged tooling path"))?;
                     let path = PathBuf::from(value);
-                    if !path.is_absolute() {
-                        return Err(Error::new("packaged tooling paths must be absolute"));
+                    if version == 1 {
+                        if !path.is_absolute() {
+                            return Err(Error::new("packaged tooling paths must be absolute"));
+                        }
+                        return Ok(path);
                     }
-                    Ok(path)
+                    package_relative_path(prefix, &path)
                 };
                 Ok(Self {
                     rules: field("rules")?,
                     scanner: field("scanner")?,
                     docs: field("docs")?,
-                    ca: Some(field("ca")?),
+                    ca: if version == 2 && config["ca"].is_null() {
+                        None
+                    } else {
+                        Some(field("ca")?)
+                    },
                 })
             }
         }
     }
 }
 
-pub fn program_available(program: &str, cwd: &Path) -> bool {
-    fn executable(path: &Path) -> bool {
-        fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-            && nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+fn package_relative_path(prefix: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.as_os_str().is_empty()
+        || relative.to_string_lossy().contains(['\\', ':'])
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(Error::new(
+            "portable packaged tooling paths must be relative and cannot traverse parents",
+        ));
     }
-    if program.contains('/') {
+    let prefix = fs::canonicalize(prefix)?;
+    let mut path = prefix.clone();
+    for component in relative.components() {
+        path.push(component.as_os_str());
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                if !fs::canonicalize(&path)?.starts_with(&prefix) {
+                    return Err(Error::new(
+                        "packaged tooling path escapes the package prefix",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(path)
+}
+
+fn executable(path: &Path) -> bool {
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
+            })
+    }
+}
+
+fn executable_candidate(path: PathBuf) -> Option<PathBuf> {
+    if executable(&path) {
+        return Some(path);
+    }
+    #[cfg(windows)]
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["exe", "com", "bat", "cmd"]
+                .iter()
+                .any(|native| extension.eq_ignore_ascii_case(native))
+        })
+    {
+        // Restrict PATHEXT to native executables. Command would otherwise invoke
+        // cmd.exe implicitly for .bat/.cmd, violating the argv-only contract.
+        let extensions = env::var_os("PATHEXT").unwrap_or_else(|| ".EXE;.COM".into());
+        for extension in extensions.to_string_lossy().split(';') {
+            if !extension.eq_ignore_ascii_case(".exe") && !extension.eq_ignore_ascii_case(".com") {
+                continue;
+            }
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(extension);
+            let candidate = PathBuf::from(candidate);
+            if executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn resolve_program(program: &str, cwd: &Path) -> Option<PathBuf> {
+    let explicit = program.contains('/')
+        || cfg!(windows) && program.contains('\\')
+        || Path::new(program)
+            .components()
+            .any(|part| matches!(part, Component::Prefix(_)));
+    if explicit {
         let path = Path::new(program);
-        return executable(&if path.is_absolute() {
+        return executable_candidate(if path.is_absolute() {
             path.to_path_buf()
         } else {
             cwd.join(path)
         });
     }
-    env::var_os("PATH").is_some_and(|paths| {
-        env::split_paths(&paths).any(|path| {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths).find_map(|path| {
             let path = if path.is_absolute() {
                 path
             } else {
                 cwd.join(path)
             };
-            executable(&path.join(program))
+            executable_candidate(path.join(program))
         })
     })
+}
+
+pub fn program_available(program: &str, cwd: &Path) -> bool {
+    resolve_program(program, cwd).is_some()
 }
 
 pub fn run_check(
@@ -134,11 +230,20 @@ pub fn run_check(
         ));
         return Ok(result);
     }
-    let mut command = Command::new(&check.argv[0]);
+    let Some(program) = resolve_program(&check.argv[0], &cwd) else {
+        result["diagnostics"] = json!(format!(
+            "runner could not start {:?}: executable is unavailable\n{TOOLCHAIN_HINT}",
+            check.argv[0]
+        ));
+        return Ok(result);
+    };
+    let mut command = Command::new(program);
     command
         .args(&check.argv[1..])
         .current_dir(&cwd)
         .env("TMPDIR", scratch)
+        .env("TMP", scratch)
+        .env("TEMP", scratch)
         .env("CARGO_TARGET_DIR", cache.join("cargo-target"))
         .env("RUFF_CACHE_DIR", cache.join("ruff"))
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -325,15 +430,11 @@ pub fn compiler_cache(root: &Path) -> Option<PathBuf> {
     let base = env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".cache"))
-        })?;
+        .or_else(default_cache_home)?;
     if !base.is_absolute() {
         return None;
     }
-    let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_bytes()));
+    let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
     let cache = base.join("project-check").join(format!(
         "{}-{}",
         root.file_name()?.to_string_lossy(),
@@ -347,6 +448,26 @@ pub fn compiler_cache(root: &Path) -> Option<PathBuf> {
         .tempfile_in(&cache)
         .ok()?;
     Some(cache)
+}
+
+fn default_cache_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join("AppData/Local"))
+            })
+    }
+    #[cfg(unix)]
+    {
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(".cache"))
+    }
 }
 
 pub fn documentation_checks(
@@ -571,6 +692,117 @@ pub fn plan(
 mod safety_regressions {
     use super::*;
 
+    fn portable_tools_manifest(prefix: &Path, scanner: &str) {
+        fs::create_dir_all(prefix.join("share/project-check")).unwrap();
+        let config = json!({
+            "version": 2,
+            "rules": "share/project-check/rules",
+            "scanner": scanner,
+            "docs": format!("bin/project-docs{}", env::consts::EXE_SUFFIX),
+            "ca": null
+        });
+        fs::write(
+            prefix.join("share/project-check/tools.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn portable_tooling_paths_follow_the_package_prefix() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original = temporary.path().join("original package");
+        let moved = temporary.path().join("moved package");
+        portable_tools_manifest(&original, "lib/semgrep/scanner");
+        let before = Tools::from_prefix(&original).unwrap();
+        assert_eq!(
+            before.scanner,
+            fs::canonicalize(&original)
+                .unwrap()
+                .join("lib/semgrep/scanner")
+        );
+        assert!(before.ca.is_none());
+        fs::rename(&original, &moved).unwrap();
+        let after = Tools::from_prefix(&moved).unwrap();
+        let resolved = fs::canonicalize(&moved).unwrap();
+        assert_eq!(after.rules, resolved.join("share/project-check/rules"));
+        assert_eq!(after.scanner, resolved.join("lib/semgrep/scanner"));
+        assert_eq!(
+            after.docs,
+            resolved.join(format!("bin/project-docs{}", env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[test]
+    fn portable_tooling_rejects_paths_outside_the_package() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().join("package");
+        for path in [
+            "../scanner",
+            "/scanner",
+            "C:\\scanner.exe",
+            "bin/scanner:stream",
+            "",
+        ] {
+            portable_tools_manifest(&prefix, path);
+            assert!(Tools::from_prefix(&prefix).is_err(), "accepted {path:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_tooling_rejects_symlink_escape() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().join("package");
+        portable_tools_manifest(&prefix, "scanner");
+        let outside = temporary.path().join("outside-scanner");
+        fs::write(&outside, "scanner fixture").unwrap();
+        std::os::unix::fs::symlink(outside, prefix.join("scanner")).unwrap();
+        assert!(Tools::from_prefix(&prefix).is_err());
+    }
+
+    #[test]
+    fn nix_tooling_keeps_absolute_version_one_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        fs::create_dir_all(prefix.join("share/project-check")).unwrap();
+        let rules = prefix.join("nix-store-rules");
+        let scanner = prefix.join("nix-store-scanner");
+        let docs = prefix.join("nix-store-docs");
+        let ca = prefix.join("nix-store-ca");
+        fs::write(
+            prefix.join("share/project-check/tools.json"),
+            serde_json::to_vec(
+                &json!({"version":1,"rules":rules,"scanner":scanner,"docs":docs,"ca":ca}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let tools = Tools::from_prefix(prefix).unwrap();
+        assert_eq!(tools.rules, rules);
+        assert_eq!(tools.scanner, scanner);
+        assert_eq!(tools.docs, docs);
+        assert_eq!(tools.ca, Some(ca));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolution_adds_exe_and_rejects_implicit_batch_scripts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::write(root.join("native.exe"), "native fixture").unwrap();
+        fs::write(root.join("native.v2.exe"), "native fixture").unwrap();
+        fs::write(root.join("implicit.cmd"), "batch fixture").unwrap();
+        fs::write(root.join("implicit.bat"), "batch fixture").unwrap();
+        assert!(program_available("./native", root));
+        assert!(program_available("./native.exe", root));
+        assert!(program_available("./native.v2", root));
+        assert!(!program_available("./implicit", root));
+        assert!(!program_available("./implicit.cmd", root));
+        assert!(!program_available("./implicit.bat", root));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn prerequisites_observe_the_callers_execute_permission_class() {
         let root = tempfile::tempdir().unwrap();

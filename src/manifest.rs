@@ -1,5 +1,5 @@
 use crate::diagnostics;
-use crate::util::{atomic_write, parse_json, read_limited, resolve_inside};
+use crate::util::{atomic_write, is_link, parse_json, read_limited, resolve_inside};
 use crate::{Error, MAX_MANIFEST_BYTES, Result};
 use regex::Regex;
 use serde::Serialize;
@@ -471,7 +471,7 @@ fn preserve_layout(text: &str, document: &Value, upgraded: &Value) -> Option<Str
 
 fn regular_manifest(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !metadata.is_file() || is_link(&metadata) {
         return Err(Error::new(format!(
             "{MANIFEST} migration requires a regular, non-symlink file"
         )));

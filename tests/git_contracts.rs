@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use project_check::git;
 use project_check::manifest::{self, Check, Manifest};
 use project_check::process::Signals;
