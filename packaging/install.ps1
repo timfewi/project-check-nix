@@ -40,7 +40,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot "share/project-check/rules") -De
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "LICENSE") -Destination $Prefix
 & $Python -m venv (Join-Path $Prefix "lib/semgrep")
 if ($LASTEXITCODE -ne 0) { throw "Could not create the Semgrep environment; Python 3.10+ with venv is required." }
-& (Join-Path $Prefix "lib/semgrep/Scripts/python.exe") -m pip install --disable-pip-version-check --require-hashes -r (Join-Path $PSScriptRoot "semgrep-requirements.txt")
+& (Join-Path $Prefix "lib/semgrep/Scripts/python.exe") -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r (Join-Path $PSScriptRoot "semgrep-requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "Could not install the pinned Semgrep dependencies." }
 $oldVersionCheck = $env:SEMGREP_ENABLE_VERSION_CHECK
 $oldMetrics = $env:SEMGREP_SEND_METRICS

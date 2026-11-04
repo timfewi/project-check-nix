@@ -55,10 +55,12 @@ $env:Path = "$env:LOCALAPPDATA/Programs/project-check/0.1.0/bin;$env:Path"
 
 These PATH changes affect the current terminal. Persist the same `bin` directory
 in your user PATH if desired. Installation needs package-index access and
-downloads the scanner's hash-locked dependencies into `lib/semgrep`, using your
-existing Python. Runner and renderer remain native Rust and do not execute
-Python source. No global Python packages, hooks, Nix, or administrator privileges
-are required. On Debian/Ubuntu, Python's `venv` support may be a separate package.
+downloads only prebuilt, hash-locked dependency wheels into `lib/semgrep`, using
+your existing Python. Missing compatible wheels stop installation instead of
+building dependencies from source; scanner installation needs no Rust or C
+compiler. Runner and renderer remain native Rust and do not execute Python
+source. No global Python packages, hooks, Nix, or administrator privileges are
+required. On Debian/Ubuntu, Python's `venv` support may be a separate package.
 
 Installers refuse existing prefixes. Use a new prefix when upgrading and point
 PATH at its `bin`; removing an old prefix uninstalls that copy. A failed install
@@ -123,7 +125,9 @@ uv pip compile --universal --python-version 3.10 --generate-hashes --no-header \
 ```
 
 Semgrep 1.183+ no longer supplies an Intel macOS engine. The portable lock stays
-at 1.182.0; Nix retains its separately pinned scanner. The Nix flake exports the
+at 1.182.0 and pins `cryptography` to 48.0.1 only on Intel macOS to retain prebuilt
+wheels; other platforms retain their separately resolved dependency versions.
+Nix retains its separately pinned scanner. The Nix flake exports the
 complete runner, core, renderer, dev shells and native test checks for Linux
 x64/ARM64 and Apple Silicon macOS. The pinned nixpkgs has dropped Intel macOS
 entirely, so Intel Mac users should use the native Rust binaries and portable

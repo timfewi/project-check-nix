@@ -43,7 +43,7 @@ cp -- "$bundle/bin/project-check" "$bundle/bin/project-docs" "$prefix/bin/"
 cp -R -- "$bundle/share/project-check/rules" "$prefix/share/project-check/"
 cp -- "$bundle/LICENSE" "$prefix/LICENSE"
 "$python" -m venv "$prefix/lib/semgrep"
-"$prefix/lib/semgrep/bin/python" -m pip install --disable-pip-version-check --require-hashes \
+"$prefix/lib/semgrep/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes \
   -r "$bundle/semgrep-requirements.txt"
 SEMGREP_ENABLE_VERSION_CHECK=0 SEMGREP_SEND_METRICS=off "$prefix/lib/semgrep/bin/semgrep" --version
 cat > "$prefix/share/project-check/tools.json" <<'JSON'
