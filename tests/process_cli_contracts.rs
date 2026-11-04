@@ -318,38 +318,23 @@ fn wait_path(path: &Path) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+#[cfg(target_os = "linux")]
 fn running(pid: i32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .is_some_and(|stat| {
-                stat.rsplit_once(')')
-                    .is_some_and(|(_, tail)| !tail.trim_start().starts_with('Z'))
-            })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Darwin has no procfs. Inspect state rather than kill(pid, 0), which
-        // also reports zombie children as alive until their adopter reaps them.
-        let output = Command::new("/bin/ps")
-            .args(["-o", "state=", "-p", &pid.to_string()])
-            .output()
-            .expect("native ps is available");
-        output.status.success()
-            && String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .chars()
-                .next()
-                .is_some_and(|state| state != 'Z')
-    }
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .is_some_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, tail)| !tail.trim_start().starts_with('Z'))
+        })
 }
 
 #[test]
 fn sigint_and_sigterm_clean_up_the_owned_check_group() {
     for (signal, code) in [(Signal::SIGINT, 130), (Signal::SIGTERM, 143)] {
         let package = Package::new();
-        package.manifest("sleep 30 & echo $! > child.pid; printf started > started; wait");
+        package.manifest(
+            "(while :; do printf x >> heartbeat; sleep 0.05; done) & echo $! > child.pid; wait",
+        );
         let mut command = package.command(&["fast", "--json"]);
         command.stdin(Stdio::null());
         let mut running_cli = Running::spawn(command);
@@ -360,7 +345,20 @@ fn sigint_and_sigterm_clean_up_the_owned_check_group() {
             .parse()
             .unwrap();
         running_cli.known_child = Some(pid);
+        let heartbeat = package.project.join("heartbeat");
+        wait_path(&heartbeat);
         assert_eq!(running_cli.signal_and_wait(signal), code);
+        // Observe the owned descendant's work directly. This also works in a
+        // Darwin Nix sandbox without an impure host ps or a procfs mount, and
+        // does not mistake an exited but not-yet-reaped zombie for a survivor.
+        let length = fs::metadata(&heartbeat).unwrap().len();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            fs::metadata(&heartbeat).unwrap().len(),
+            length,
+            "owned check child kept running after signal"
+        );
+        #[cfg(target_os = "linux")]
         assert!(!running(pid), "owned check child survived signal");
     }
 }
