@@ -505,10 +505,10 @@ impl Running {
         thread::spawn(move || {
             for line in BufReader::new(output).lines() {
                 let Ok(line) = line else { break };
-                if let Ok(report) = serde_json::from_str(&line) {
-                    if sender.send(report).is_err() {
-                        break;
-                    }
+                if let Ok(report) = serde_json::from_str(&line)
+                    && sender.send(report).is_err()
+                {
+                    break;
                 }
             }
         });
