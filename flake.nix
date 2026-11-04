@@ -10,16 +10,9 @@
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
-      # The pinned nixpkgs scanner has no Intel macOS engine. Native core and
-      # renderer outputs remain available there; the portable installer supplies
-      # its explicitly pinned Intel-compatible scanner separately.
-      scannerSystems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
-      ];
+      # The pinned nixpkgs has dropped Intel macOS entirely. That platform uses
+      # the native Rust binaries and portable installer instead of this flake.
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
@@ -27,22 +20,16 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          projectCheck = pkgs.callPackage ./packages/project-check.nix { };
           qualityRules = pkgs.callPackage ./packages/quality-rules.nix { };
         in
         {
+          default = projectCheck;
+          project-check = projectCheck;
           project-check-core = pkgs.callPackage ./packages/project-check-core.nix { };
           project-docs = pkgs.callPackage ./packages/project-docs.nix { };
           quality-rules = qualityRules;
         }
-        // nixpkgs.lib.optionalAttrs (builtins.elem system scannerSystems) (
-          let
-            projectCheck = pkgs.callPackage ./packages/project-check.nix { };
-          in
-          {
-            default = projectCheck;
-            project-check = projectCheck;
-          }
-        )
       );
 
       checks = forAllSystems (
@@ -54,8 +41,6 @@
         {
           # Native contracts and linting do not depend on the Semgrep package.
           rust-tests = pkgs.callPackage ./packages/project-check-core.nix { };
-        }
-        // nixpkgs.lib.optionalAttrs (builtins.elem system scannerSystems) {
           # Round-trips the immutable portable rules against their positive and
           # negative fixtures through the real Semgrep scanner. Opt-in: it builds
           # Semgrep.

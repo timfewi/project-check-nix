@@ -121,11 +121,11 @@ uv pip compile --universal --python-version 3.10 --generate-hashes --no-header \
 ```
 
 Semgrep 1.183+ no longer supplies an Intel macOS engine. The portable lock stays
-at 1.182.0; Nix retains its separately pinned scanner. The Nix flake exports core,
-renderer, dev shells and native test checks for Linux x64/ARM64 and both Darwin
-architectures. Its complete `project-check` package and scanner fixtures are
-exported for Linux and Apple Silicon only, because the pinned nixpkgs scanner
-lacks an Intel engine. Intel Mac users should use the native installer.
+at 1.182.0; Nix retains its separately pinned scanner. The Nix flake exports the
+complete runner, core, renderer, dev shells and native test checks for Linux
+x64/ARM64 and Apple Silicon macOS. The pinned nixpkgs has dropped Intel macOS
+entirely, so Intel Mac users should use the native Rust binaries and portable
+installer. Intel macOS remains covered by the native CI job.
 
 ## What it runs
 
