@@ -332,7 +332,7 @@ fn running(pid: i32) -> bool {
     {
         // Darwin has no procfs. Inspect state rather than kill(pid, 0), which
         // also reports zombie children as alive until their adopter reaps them.
-        let output = Command::new("ps")
+        let output = Command::new("/bin/ps")
             .args(["-o", "state=", "-p", &pid.to_string()])
             .output()
             .expect("native ps is available");

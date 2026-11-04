@@ -30,6 +30,8 @@ not a complete installation.
 | Windows x64 | Native PowerShell installation; x64 Python 3.10+ with `venv`; Semgrep's Windows support is beta |
 | Windows WSL2 | Use the Linux archive or the Nix installation inside WSL2 |
 
+The Windows Rust binaries statically link the C runtime; CI checks their DLL imports.
+
 The workflow runs native contracts and a real scanner replay on each native
 target; a cross-compile alone is not evidence of runtime support. Other Linux
 distributions need compatible glibc and Python; Alpine/musl and other CPU

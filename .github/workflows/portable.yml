@@ -69,6 +69,34 @@ jobs:
           bundle="$RUNNER_TEMP/project-check-bundle"
           if [[ "$RUNNER_OS" == Windows ]]; then bundle="$(cygpath -u "$bundle")"; fi
           bash scripts/package "$TARGET" "$bundle"
+      - name: Verify Windows binaries do not require the VC runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $reader = Join-Path $env:ProgramFiles 'LLVM/bin/llvm-readobj.exe'
+          $arguments = @('--coff-imports')
+          if (-not (Test-Path -LiteralPath $reader -PathType Leaf)) {
+            $command = Get-Command llvm-readobj.exe -ErrorAction SilentlyContinue
+            if ($null -ne $command) {
+              $reader = $command.Source
+            } else {
+              $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+              $reader = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+              $arguments = @('/DEPENDENTS')
+            }
+          }
+          if (-not $reader -or -not (Test-Path -LiteralPath $reader -PathType Leaf)) {
+            throw 'No PE dependency inspector is available.'
+          }
+          foreach ($binary in @('project-check.exe', 'project-docs.exe')) {
+            $path = Join-Path $env:RUNNER_TEMP "project-check-bundle/bin/$binary"
+            $imports = & $reader @arguments $path
+            if ($LASTEXITCODE -ne 0) { throw "Could not inspect $binary dependencies." }
+            $imports | Write-Output
+            if (($imports -join "`n") -match '(?im)^\s*(?:Name:\s*)?(?:vcruntime|msvcp|msvcr|ucrtbase|api-ms-win-crt-)[^\r\n]*\.dll\s*$') {
+              throw "$binary depends on a dynamic C runtime."
+            }
+          }
       - name: Install into a prefix containing spaces (Unix)
         if: runner.os != 'Windows'
         run: bash "$RUNNER_TEMP/project-check-bundle/install.sh" --prefix "$RUNNER_TEMP/project check installed" --python python

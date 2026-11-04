@@ -14,6 +14,15 @@ if [[ -e "$output" || -L "$output" ]]; then
 fi
 suffix=""
 case "$target" in *windows*) suffix=".exe" ;; esac
+if [[ "$target" == *-pc-windows-msvc ]]; then
+  # Fresh Windows installations need no separate VC runtime for these binaries.
+  # Cargo gives encoded flags priority when both environment forms are present.
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}"$'\x1f-C\x1ftarget-feature=+crt-static'
+  else
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+  fi
+fi
 cargo build --release --locked --target "$target" --bin project-check --bin project-docs
 build_directory="${CARGO_TARGET_DIR:-target}/$target/release"
 mkdir -p -- "$output/bin" "$output/share/project-check/rules"

@@ -37,6 +37,8 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.bash
     pkgs.coreutils
   ];
+  # Darwin's native process-state probe is a host tool, outside the Nix PATH.
+  __impureHostDeps = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ "/bin/ps" ];
   env.RUSTFLAGS = "-D warnings";
   preBuild = ''
     cargo fmt --all -- --check
