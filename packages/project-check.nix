@@ -4,11 +4,12 @@
 let
   core = pkgs.callPackage ./project-check-core.nix { };
   qualityRules = pkgs.callPackage ./quality-rules.nix { };
+  semgrep = import ./semgrep.nix { inherit pkgs; };
   tooling = pkgs.writeText "project-check-tools.json" (
     builtins.toJSON {
       version = 1;
       rules = toString qualityRules;
-      scanner = "${pkgs.semgrep}/bin/semgrep";
+      scanner = "${semgrep}/bin/semgrep";
       docs = "${core}/bin/project-docs";
       ca = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     }

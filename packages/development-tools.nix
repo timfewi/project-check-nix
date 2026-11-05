@@ -8,7 +8,7 @@ with pkgs;
   devenv
   git
   just
-  nix
+  nixVersions.latest
   nixfmt
   ruff
   rustc

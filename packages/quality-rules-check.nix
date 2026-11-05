@@ -7,7 +7,7 @@
 pkgs.runCommand "project-check-quality-rules-check"
   {
     nativeBuildInputs = [
-      pkgs.semgrep
+      (import ./semgrep.nix { inherit pkgs; })
       pkgs.python3
     ];
   }

@@ -318,6 +318,10 @@ The package contains native executables and an immutable adjacent tooling
 manifest naming its pinned scanner, rules, CA bundle and renderer. Runtime
 environment variables cannot replace those paths. Development Cargo binaries
 use the source rule directory, a `semgrep` on PATH and a sibling renderer.
+The Semgrep 1.180.0 package carries the same compatibility fixes as
+agent-toolbox-nix: a relative bundled-library RUNPATH avoids a patchelf crash,
+and MCP 1 retains the FastMCP API used by that release. The rule replay uses
+this exact scanner package too.
 The scanner may itself depend on Python; the runner/renderer do not embed or
 invoke a Python interpreter.
 
@@ -401,7 +405,8 @@ before running the Nix gate; commits and publication are separate operations.
 
 `devenv.nix` and the flake's development shell share
 `packages/development-tools.nix`: Rust, Cargo, Clippy, rustfmt, Ruff, Git, Nix,
-nixfmt, `just` and the `devenv` CLI. Both use the same immutable nixpkgs
+nixfmt, `just` and the `devenv` CLI. Nix uses `nixVersions.latest`, matching
+the shared toolbox and nixd's Nix libraries. Both use the same immutable nixpkgs
 revision; `devenv.lock` records the standalone environment's resolved inputs.
 No rustup download, additional Cachix trust or Git-hook installation is needed.
 

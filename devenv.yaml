@@ -2,4 +2,4 @@ inputs:
   devenv:
     url: github:cachix/devenv/v2.4.0?dir=src/modules
   nixpkgs:
-    url: github:NixOS/nixpkgs/7a0f122f5090cf4c2ade2a13a0e229d4e19ba71f
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
