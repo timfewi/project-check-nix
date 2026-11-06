@@ -1,5 +1,5 @@
 use crate::diagnostics;
-use crate::util::{atomic_write, parse_json, read_limited, resolve_inside};
+use crate::util::{atomic_write, is_link, parse_json, read_limited, resolve_inside};
 use crate::{Error, MAX_MANIFEST_BYTES, Result};
 use regex::Regex;
 use serde::Serialize;
@@ -370,9 +370,12 @@ pub fn validate(root: &Path, document: &Value) -> Result<Manifest> {
         if cwd.is_empty()
             || cwd.contains('\0')
             || Path::new(cwd).is_absolute()
-            || Path::new(cwd)
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
+            || Path::new(cwd).components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
         {
             return Err(Error::new(format!(
                 "{name}: cwd must be relative without parent traversal"
@@ -471,7 +474,7 @@ fn preserve_layout(text: &str, document: &Value, upgraded: &Value) -> Option<Str
 
 fn regular_manifest(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !metadata.is_file() || is_link(&metadata) {
         return Err(Error::new(format!(
             "{MANIFEST} migration requires a regular, non-symlink file"
         )));
@@ -708,6 +711,17 @@ mod tests {
         ] {
             let mut declared = document(2);
             declared["checks"][0]["cwd"] = cwd;
+            invalid(root.path(), &declared, "cwd must be relative");
+        }
+        #[cfg(windows)]
+        for cwd in [
+            r"\rooted",
+            r"C:drive-relative",
+            r"C:\absolute",
+            r"\\server\share",
+        ] {
+            let mut declared = document(2);
+            declared["checks"][0]["cwd"] = json!(cwd);
             invalid(root.path(), &declared, "cwd must be relative");
         }
         let mut declared = document(2);

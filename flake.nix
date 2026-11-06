@@ -9,7 +9,10 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
+      # The pinned nixpkgs has dropped Intel macOS entirely. That platform uses
+      # the native Rust binaries and portable installer instead of this flake.
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
@@ -23,6 +26,7 @@
         {
           default = projectCheck;
           project-check = projectCheck;
+          project-check-core = pkgs.callPackage ./packages/project-check-core.nix { };
           project-docs = pkgs.callPackage ./packages/project-docs.nix { };
           quality-rules = qualityRules;
         }

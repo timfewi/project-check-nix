@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use project_check::manifest::{self, Check, ExpectedWarning, Manifest};
 use project_check::process::Signals;
 use project_check::runner::{self, Tools};

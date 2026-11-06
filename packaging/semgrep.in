@@ -1,0 +1,7 @@
+# Portable installations pin the scanner and its transitive dependencies.
+# Regenerate semgrep-requirements.txt with the documented uv pip compile command.
+semgrep==1.182.0
+# Newer cryptography releases no longer publish Intel macOS wheels. Keep this
+# platform installable without a compiler; all other platforms use newer wheels.
+cryptography==48.0.1 ; sys_platform == "darwin" and platform_machine == "x86_64"
+cryptography==50.0.2 ; sys_platform != "darwin" or platform_machine != "x86_64"

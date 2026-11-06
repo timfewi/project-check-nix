@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(unix)]
 
 use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
@@ -35,7 +36,7 @@ fn script(path: &Path, code: &str) {
 fn capture_preserves_exact_boundary_and_fails_on_one_extra_byte() {
     for (extra, failure) in [(false, None), (true, Some(CaptureFailure::OutputLimit))] {
         let code = format!(
-            "dd if=/dev/zero bs=1048576 count=4 status=none; {}",
+            "dd if=/dev/zero bs=1048576 count=4 2>/dev/null; {}",
             if extra { "printf x" } else { ":" }
         );
         let result = capture(
@@ -317,6 +318,7 @@ fn wait_path(path: &Path) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+#[cfg(target_os = "linux")]
 fn running(pid: i32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -330,7 +332,9 @@ fn running(pid: i32) -> bool {
 fn sigint_and_sigterm_clean_up_the_owned_check_group() {
     for (signal, code) in [(Signal::SIGINT, 130), (Signal::SIGTERM, 143)] {
         let package = Package::new();
-        package.manifest("sleep 30 & echo $! > child.pid; printf started > started; wait");
+        package.manifest(
+            "(while :; do printf x >> heartbeat; sleep 0.05; done) & echo $! > child.pid; wait",
+        );
         let mut command = package.command(&["fast", "--json"]);
         command.stdin(Stdio::null());
         let mut running_cli = Running::spawn(command);
@@ -341,7 +345,20 @@ fn sigint_and_sigterm_clean_up_the_owned_check_group() {
             .parse()
             .unwrap();
         running_cli.known_child = Some(pid);
+        let heartbeat = package.project.join("heartbeat");
+        wait_path(&heartbeat);
         assert_eq!(running_cli.signal_and_wait(signal), code);
+        // Observe the owned descendant's work directly. This also works in a
+        // Darwin Nix sandbox without an impure host ps or a procfs mount, and
+        // does not mistake an exited but not-yet-reaped zombie for a survivor.
+        let length = fs::metadata(&heartbeat).unwrap().len();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            fs::metadata(&heartbeat).unwrap().len(),
+            length,
+            "owned check child kept running after signal"
+        );
+        #[cfg(target_os = "linux")]
         assert!(!running(pid), "owned check child survived signal");
     }
 }

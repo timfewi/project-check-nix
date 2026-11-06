@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Assemble an archive payload; scanner installation is explicit and separate.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+if [[ "$#" -ne 2 ]]; then
+  echo "Usage: bash scripts/package TARGET NEW_OUTPUT_DIRECTORY" >&2
+  exit 2
+fi
+target="$1"
+output="$2"
+if [[ -e "$output" || -L "$output" ]]; then
+  echo "Package output already exists." >&2
+  exit 1
+fi
+suffix=""
+case "$target" in *windows*) suffix=".exe" ;; esac
+if [[ "$target" == *-pc-windows-msvc ]]; then
+  # Fresh Windows installations need no separate VC runtime for these binaries.
+  # Cargo gives encoded flags priority when both environment forms are present.
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}"$'\x1f-C\x1ftarget-feature=+crt-static'
+  else
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+  fi
+fi
+cargo build --release --locked --target "$target" --bin project-check --bin project-docs
+build_directory="${CARGO_TARGET_DIR:-target}/$target/release"
+mkdir -p -- "$output/bin" "$output/share/project-check/rules"
+cp -- "$build_directory/project-check$suffix" "$build_directory/project-docs$suffix" "$output/bin/"
+cp -- .semgrep/portable/*.yml "$output/share/project-check/rules/"
+cp -- LICENSE README.md "$output/"
+cp -- packaging/install.sh packaging/install.ps1 packaging/semgrep-requirements.txt "$output/"
+# A downloaded bundle must be installed before checks can run; this deliberately
+# prevents falling back to the build machine's source tree or a scanner on PATH.
+printf '{"version":2,"rules":"share/project-check/rules","scanner":"lib/semgrep/%s","docs":"bin/project-docs%s","ca":null}\n' \
+  "$([[ "$suffix" == .exe ]] && printf 'Scripts/semgrep.exe' || printf 'bin/semgrep')" "$suffix" \
+  > "$output/share/project-check/tools.json"
